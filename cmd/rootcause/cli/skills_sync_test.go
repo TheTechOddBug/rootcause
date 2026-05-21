@@ -105,6 +105,36 @@ func TestSyncSkillsForTargetNoOverwrite(t *testing.T) {
 	}
 }
 
+func TestSyncSkillsForTargetCopiesCustomSkill(t *testing.T) {
+	projectDir := t.TempDir()
+	customRoot := filepath.Join(projectDir, "custom-skills")
+	customDir := filepath.Join(customRoot, "team-runbook")
+	if err := os.MkdirAll(customDir, 0o755); err != nil {
+		t.Fatalf("mkdir custom skill: %v", err)
+	}
+	content := []byte("# Team Runbook\n")
+	customFile := filepath.Join(customDir, "SKILL.md")
+	if err := os.WriteFile(customFile, content, 0o644); err != nil {
+		t.Fatalf("write custom skill: %v", err)
+	}
+	skills := []catalog.Skill{{Name: "team-runbook", Path: customFile, Custom: true}}
+
+	count, dest, err := syncSkillsForTarget("unused", projectDir, agentTargets["opencode"], skills, true, false)
+	if err != nil {
+		t.Fatalf("sync custom skill: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 copied file, got %d", count)
+	}
+	data, err := os.ReadFile(filepath.Join(dest, "team-runbook", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read copied skill: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Fatalf("unexpected copied content: %q", string(data))
+	}
+}
+
 func TestSelectedSkillsFromFilter(t *testing.T) {
 	m, err := catalog.Load()
 	if err != nil {
@@ -116,6 +146,29 @@ func TestSelectedSkillsFromFilter(t *testing.T) {
 	}
 	if len(skills) != 2 {
 		t.Fatalf("expected 2 skills, got %d", len(skills))
+	}
+}
+
+func TestLoadSkillManifestIncludesCustomSkills(t *testing.T) {
+	projectDir := t.TempDir()
+	customDir := filepath.Join(projectDir, "custom")
+	if err := os.MkdirAll(filepath.Join(customDir, "team-runbook"), 0o755); err != nil {
+		t.Fatalf("mkdir custom skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(customDir, "team-runbook", "SKILL.md"), []byte("# Team Runbook\n"), 0o644); err != nil {
+		t.Fatalf("write custom skill: %v", err)
+	}
+
+	manifest, err := loadSkillManifest(true, []string{customDir}, false)
+	if err != nil {
+		t.Fatalf("loadSkillManifest: %v", err)
+	}
+	skills, err := selectedSkills(manifest, []string{"team-runbook"})
+	if err != nil {
+		t.Fatalf("selectedSkills custom: %v", err)
+	}
+	if len(skills) != 1 || !skills[0].Custom {
+		t.Fatalf("expected selected custom skill, got %#v", skills)
 	}
 }
 

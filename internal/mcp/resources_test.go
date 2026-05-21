@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,5 +98,38 @@ func TestRegisterSDKResources(t *testing.T) {
 	}
 	if len(uris) == 0 || len(templates) == 0 {
 		t.Fatalf("expected static resources and templates to be registered")
+	}
+}
+
+func TestSkillResourcesIncludeConfiguredCustomSkills(t *testing.T) {
+	customRoot := t.TempDir()
+	customSkillDir := filepath.Join(customRoot, "team-runbook")
+	if err := os.MkdirAll(customSkillDir, 0o755); err != nil {
+		t.Fatalf("mkdir custom skill: %v", err)
+	}
+	content := "# Team Runbook\n\nUse this for team incidents.\n"
+	if err := os.WriteFile(filepath.Join(customSkillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write custom skill: %v", err)
+	}
+	ctx := ToolContext{
+		Config: &config.Config{Skills: config.SkillsConfig{CustomDirs: []string{customRoot}}},
+		Policy: policy.NewAuthorizer(),
+	}
+	h := resourceHandler(ctx)
+
+	catalogResult, err := h(context.Background(), &sdkmcp.ReadResourceRequest{Params: &sdkmcp.ReadResourceParams{URI: "skill://catalog"}})
+	if err != nil {
+		t.Fatalf("read skill catalog: %v", err)
+	}
+	if !strings.Contains(catalogResult.Contents[0].Text, "team-runbook") {
+		t.Fatalf("expected custom skill in catalog: %s", catalogResult.Contents[0].Text)
+	}
+
+	skillResult, err := h(context.Background(), &sdkmcp.ReadResourceRequest{Params: &sdkmcp.ReadResourceParams{URI: "skill://team-runbook"}})
+	if err != nil {
+		t.Fatalf("read custom skill: %v", err)
+	}
+	if skillResult.Contents[0].Text != content {
+		t.Fatalf("unexpected skill content: %q", skillResult.Contents[0].Text)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"rootcause/internal/policy"
+	"rootcause/internal/skills/catalog"
 )
 
 var staticResources = []*sdkmcp.Resource{
@@ -30,6 +32,7 @@ var staticResources = []*sdkmcp.Resource{
 	{Name: "Cluster Nodes", URI: "cluster://nodes", Description: "Cluster nodes", MIMEType: "application/json"},
 	{Name: "Cluster Version", URI: "cluster://version", Description: "Kubernetes server version", MIMEType: "application/json"},
 	{Name: "Cluster API Resources", URI: "cluster://api-resources", Description: "Preferred API resources", MIMEType: "application/json"},
+	{Name: "RootCause Skills Catalog", URI: "skill://catalog", Description: "List built-in and configured custom agent skills", MIMEType: "application/json"},
 }
 
 var manifestTemplates = []*sdkmcp.ResourceTemplate{
@@ -39,6 +42,7 @@ var manifestTemplates = []*sdkmcp.ResourceTemplate{
 	{Name: "ConfigMap Manifest", URITemplate: "manifest://configmaps/{namespace}/{name}", Description: "Get configmap manifest", MIMEType: "application/yaml"},
 	{Name: "Secret Manifest", URITemplate: "manifest://secrets/{namespace}/{name}", Description: "Get redacted secret manifest", MIMEType: "application/yaml"},
 	{Name: "Ingress Manifest", URITemplate: "manifest://ingresses/{namespace}/{name}", Description: "Get ingress manifest", MIMEType: "application/yaml"},
+	{Name: "Agent Skill", URITemplate: "skill://{name}", Description: "Read a built-in or configured custom agent skill", MIMEType: "text/markdown"},
 }
 
 func RegisterSDKResources(server *sdkmcp.Server, ctx ToolContext) ([]string, []string, error) {
@@ -115,6 +119,22 @@ func resourceHandler(ctx ToolContext) sdkmcp.ResourceHandler {
 				return nil, err
 			}
 			return &sdkmcp.ReadResourceResult{Contents: []*sdkmcp.ResourceContents{{URI: uri, MIMEType: "application/yaml", Text: text}}}, nil
+		case "skill":
+			if err := ctx.Policy.CheckNamespace(user, "", false); err != nil {
+				return nil, err
+			}
+			if parsed.Host == "catalog" {
+				data, err := readSkillCatalogResource(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return jsonResourceResult(uri, data)
+			}
+			text, err := readSkillResource(ctx, parsed.Host)
+			if err != nil {
+				return nil, err
+			}
+			return &sdkmcp.ReadResourceResult{Contents: []*sdkmcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: text}}}, nil
 		default:
 			return nil, sdkmcp.ResourceNotFoundError(uri)
 		}
@@ -127,6 +147,60 @@ func jsonResourceResult(uri string, data any) (*sdkmcp.ReadResourceResult, error
 		return nil, err
 	}
 	return &sdkmcp.ReadResourceResult{Contents: []*sdkmcp.ResourceContents{{URI: uri, MIMEType: "application/json", Text: string(b)}}}, nil
+}
+
+type skillResourceInfo struct {
+	Name        string `json:"name"`
+	Category    string `json:"category"`
+	Description string `json:"description"`
+	Custom      bool   `json:"custom"`
+	URI         string `json:"uri"`
+}
+
+func readSkillCatalogResource(ctx ToolContext) (any, error) {
+	manifest, err := loadSkillsForResources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]skillResourceInfo, 0, len(manifest.Skills))
+	for _, skill := range manifest.Skills {
+		infos = append(infos, skillResourceInfo{
+			Name:        skill.Name,
+			Category:    skill.Category,
+			Description: skill.Description,
+			Custom:      skill.Custom,
+			URI:         "skill://" + skill.Name,
+		})
+	}
+	return map[string]any{"skills": infos}, nil
+}
+
+func readSkillResource(ctx ToolContext, name string) (string, error) {
+	manifest, err := loadSkillsForResources(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, skill := range manifest.Skills {
+		if strings.EqualFold(skill.Name, name) {
+			file := catalog.SkillFile("skills/claude", skill)
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return "", fmt.Errorf("read skill %s: %w", skill.Name, err)
+			}
+			return string(data), nil
+		}
+	}
+	return "", sdkmcp.ResourceNotFoundError("skill://" + name)
+}
+
+func loadSkillsForResources(ctx ToolContext) (catalog.Manifest, error) {
+	if ctx.Config == nil || len(ctx.Config.Skills.CustomDirs) == 0 {
+		return catalog.Load()
+	}
+	return catalog.LoadWithCustom(catalog.CustomOptions{
+		Dirs:           ctx.Config.Skills.CustomDirs,
+		AllowOverrides: ctx.Config.Skills.AllowCustomOverrides,
+	})
 }
 
 func readKubeconfigResource(ctx ToolContext, resource string) (any, error) {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"maps"
 	"path/filepath"
 	"sort"
 
@@ -23,6 +24,7 @@ type Config struct {
 	Cache              CacheConfig     `toml:"cache"`
 	Transport          TransportConfig `toml:"transport"`
 	Prompts            PromptsConfig   `toml:"prompts"`
+	Skills             SkillsConfig    `toml:"skills"`
 }
 
 type SafetyConfig struct {
@@ -55,6 +57,11 @@ type TransportConfig struct {
 
 type PromptsConfig struct {
 	File string `toml:"file"`
+}
+
+type SkillsConfig struct {
+	CustomDirs           []string `toml:"custom_dirs"`
+	AllowCustomOverrides bool     `toml:"allow_custom_overrides"`
 }
 
 type Overrides struct {
@@ -196,9 +203,7 @@ func merge(dst *Config, src Config) {
 		if dst.Timeouts.PerTool == nil {
 			dst.Timeouts.PerTool = map[string]int{}
 		}
-		for key, value := range src.Timeouts.PerTool {
-			dst.Timeouts.PerTool[key] = value
-		}
+		maps.Copy(dst.Timeouts.PerTool, src.Timeouts.PerTool)
 	}
 	if src.Cache.DiscoveryTTLSeconds > 0 {
 		dst.Cache.DiscoveryTTLSeconds = src.Cache.DiscoveryTTLSeconds
@@ -223,6 +228,12 @@ func merge(dst *Config, src Config) {
 	}
 	if src.Prompts.File != "" {
 		dst.Prompts.File = src.Prompts.File
+	}
+	if len(src.Skills.CustomDirs) > 0 {
+		dst.Skills.CustomDirs = append([]string{}, src.Skills.CustomDirs...)
+	}
+	if src.Skills.AllowCustomOverrides {
+		dst.Skills.AllowCustomOverrides = src.Skills.AllowCustomOverrides
 	}
 }
 

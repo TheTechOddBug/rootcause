@@ -129,6 +129,33 @@ rootcause sync-skills --agent claude --skill k8s-incident --skill rootcause-rca
 rootcause sync-skills --list-skills
 ```
 
+### User Custom Skills
+
+Users can add team or personal skills in a folder containing one subdirectory per skill:
+
+```text
+~/.rootcause/skills/
+  team-runbook/
+    SKILL.md
+```
+
+Sync custom skills into supported agent directories:
+
+```bash
+rootcause sync-skills --agent opencode --include-custom
+rootcause sync-skills --agent claude --custom-dir ~/.rootcause/skills --skill team-runbook
+```
+
+Expose custom skills through MCP resources by adding them to config:
+
+```toml
+[skills]
+custom_dirs = ["~/.rootcause/skills", "./skills/custom"]
+allow_custom_overrides = false
+```
+
+MCP clients can read `skill://catalog` for the merged skill list and `skill://team-runbook` for the skill content. Custom names cannot collide with built-ins unless overrides are explicitly enabled.
+
 Agent directory defaults used by `sync-skills`:
 
 | Agent | Format | Project Directory |

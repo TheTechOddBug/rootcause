@@ -59,6 +59,8 @@ var canonicalAgentKeys = []string{
 	"amazonq",
 }
 
+var defaultCustomSkillDirs = []string{"~/.rootcause/skills"}
+
 func newSyncSkillsCmd(stderr io.Writer) *cobra.Command {
 	var agent string
 	var projectDir string
@@ -69,6 +71,9 @@ func newSyncSkillsCmd(stderr io.Writer) *cobra.Command {
 	var allAgents bool
 	var dryRun bool
 	var skillFilters []string
+	var includeCustom bool
+	var customDirs []string
+	var allowCustomOverrides bool
 
 	cmd := &cobra.Command{
 		Use:   "sync-skills",
@@ -86,7 +91,7 @@ func newSyncSkillsCmd(stderr io.Writer) *cobra.Command {
 			if listOnly {
 				return listAgentTargets(stderr)
 			}
-			manifest, err := catalog.Load()
+			manifest, err := loadSkillManifest(includeCustom || len(customDirs) > 0, customDirs, allowCustomOverrides)
 			if err != nil {
 				return err
 			}
@@ -144,8 +149,22 @@ func newSyncSkillsCmd(stderr io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&allAgents, "all-agents", false, "sync skills to all supported agents")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned copies without writing files")
 	cmd.Flags().StringSliceVar(&skillFilters, "skill", nil, "sync only selected skill name(s); can be repeated")
+	cmd.Flags().BoolVar(&includeCustom, "include-custom", false, "include custom skills from --custom-dir or ~/.rootcause/skills")
+	cmd.Flags().StringSliceVar(&customDirs, "custom-dir", nil, "custom skills directory containing <skill-name>/SKILL.md; can be repeated")
+	cmd.Flags().BoolVar(&allowCustomOverrides, "custom-overrides", false, "allow custom skills to override built-in skill names")
 
 	return cmd
+}
+
+func loadSkillManifest(includeCustom bool, customDirs []string, allowCustomOverrides bool) (catalog.Manifest, error) {
+	if !includeCustom {
+		return catalog.Load()
+	}
+	dirs := append([]string{}, customDirs...)
+	if len(dirs) == 0 {
+		dirs = append(dirs, defaultCustomSkillDirs...)
+	}
+	return catalog.LoadWithCustom(catalog.CustomOptions{Dirs: dirs, AllowOverrides: allowCustomOverrides})
 }
 
 func listAgentTargets(w io.Writer) error {
@@ -173,7 +192,7 @@ func syncSkillsForTarget(sourceDir, projectDir string, target agentTarget, skill
 	}
 	count := 0
 	for _, skill := range skills {
-		srcFile := filepath.Join(sourceDir, filepath.Base(catalog.SkillDir(skill)), "SKILL.md")
+		srcFile := catalog.SkillFile(sourceDir, skill)
 		data, err := os.ReadFile(srcFile)
 		if err != nil {
 			if os.IsNotExist(err) {

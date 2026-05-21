@@ -70,6 +70,10 @@ allow_destructive_tools = ["k8s.delete"]
 
 [prompts]
 file = "./rootcause-prompts.toml"
+
+[skills]
+custom_dirs = ["./skills/custom"]
+allow_custom_overrides = true
 `), 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -85,6 +89,9 @@ file = "./rootcause-prompts.toml"
 	}
 	if cfg.Prompts.File != "./rootcause-prompts.toml" {
 		t.Fatalf("unexpected prompts config: %#v", cfg.Prompts)
+	}
+	if len(cfg.Skills.CustomDirs) != 1 || cfg.Skills.CustomDirs[0] != "./skills/custom" || !cfg.Skills.AllowCustomOverrides {
+		t.Fatalf("unexpected skills config: %#v", cfg.Skills)
 	}
 }
 
@@ -136,6 +143,10 @@ func TestMergeTimeoutsAndCache(t *testing.T) {
 			AllowedCommands: []string{"echo"},
 		},
 		Prompts: PromptsConfig{File: "/tmp/prompts.toml"},
+		Skills: SkillsConfig{
+			CustomDirs:           []string{"/tmp/skills"},
+			AllowCustomOverrides: true,
+		},
 	}
 	merge(&dst, src)
 	if !dst.ReadOnly {
@@ -155,6 +166,9 @@ func TestMergeTimeoutsAndCache(t *testing.T) {
 	}
 	if dst.Prompts.File != "/tmp/prompts.toml" {
 		t.Fatalf("unexpected prompts config: %#v", dst.Prompts)
+	}
+	if len(dst.Skills.CustomDirs) != 1 || dst.Skills.CustomDirs[0] != "/tmp/skills" || !dst.Skills.AllowCustomOverrides {
+		t.Fatalf("unexpected skills config: %#v", dst.Skills)
 	}
 }
 
