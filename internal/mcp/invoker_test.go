@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"rootcause/internal/config"
 	"rootcause/internal/policy"
@@ -77,14 +78,9 @@ func TestInvokerSuccess(t *testing.T) {
 
 func TestInvokerAttachesTaggedCustomSkillGuidance(t *testing.T) {
 	customRoot := t.TempDir()
-	customDir := filepath.Join(customRoot, "demo-skill")
-	if err := os.MkdirAll(customDir, 0o755); err != nil {
-		t.Fatalf("mkdir custom skill: %v", err)
-	}
 	content := "---\ntags: [demo]\ndescription: Demo tool guidance\n---\n# Demo Skill\n"
-	if err := os.WriteFile(filepath.Join(customDir, "SKILL.md"), []byte(content), 0o644); err != nil {
-		t.Fatalf("write custom skill: %v", err)
-	}
+	writeMCPTestCustomSkill(t, customRoot, "demo-skill", content)
+
 	cfg := config.DefaultConfig()
 	cfg.Skills.CustomDirs = []string{customRoot}
 	reg := NewRegistry(&cfg)
@@ -109,6 +105,197 @@ func TestInvokerAttachesTaggedCustomSkillGuidance(t *testing.T) {
 	if len(guidance) != 1 || guidance[0].Name != "demo-skill" || guidance[0].Content != content {
 		t.Fatalf("unexpected custom skill guidance: %#v", guidance)
 	}
+}
+
+func TestCustomSkillGuidanceMatchesRootCauseToolsetTag(t *testing.T) {
+	customRoot := t.TempDir()
+	content := "---\ntags: [rootcause]\ndescription: RootCause issue runbook\n---\n# RootCause Runbook\n"
+	writeMCPTestCustomSkill(t, customRoot, "rootcause-runbook", content)
+
+	cfg := config.DefaultConfig()
+	cfg.Skills.CustomDirs = []string{customRoot}
+	spec := ToolSpec{Name: "rootcause.incident_bundle", ToolsetID: "rootcause", Safety: SafetyReadOnly}
+
+	guidance, err := customSkillGuidanceForTool(&cfg, spec, nil, newCustomSkillCache())
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool: %v", err)
+	}
+	if len(guidance) != 1 {
+		t.Fatalf("expected one rootcause guidance item, got %#v", guidance)
+	}
+	if guidance[0].Name != "rootcause-runbook" || guidance[0].Content != content {
+		t.Fatalf("unexpected rootcause guidance: %#v", guidance[0])
+	}
+}
+
+func TestCustomSkillGuidanceMatchesExplicitCustomSkillTags(t *testing.T) {
+	customRoot := t.TempDir()
+	content := "---\ntags: [payments]\ndescription: Payments runbook\n---\n# Payments Runbook\n"
+	writeMCPTestCustomSkill(t, customRoot, "payments-runbook", content)
+
+	cfg := config.DefaultConfig()
+	cfg.Skills.CustomDirs = []string{customRoot}
+	spec := ToolSpec{Name: "k8s.events", ToolsetID: "k8s", Safety: SafetyReadOnly}
+	cache := newCustomSkillCache()
+
+	guidance, err := customSkillGuidanceForTool(&cfg, spec, nil, cache)
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool without tag: %v", err)
+	}
+	if len(guidance) != 0 {
+		t.Fatalf("expected no guidance without explicit payments tag, got %#v", guidance)
+	}
+
+	guidance, err = customSkillGuidanceForTool(&cfg, spec, map[string]any{"customSkillTags": []any{"payments"}}, cache)
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool with tag: %v", err)
+	}
+	if len(guidance) != 1 || guidance[0].Name != "payments-runbook" {
+		t.Fatalf("expected payments guidance from customSkillTags, got %#v", guidance)
+	}
+}
+
+func TestCustomSkillGuidanceSkipsUntaggedCustomSkill(t *testing.T) {
+	customRoot := t.TempDir()
+	writeMCPTestCustomSkill(t, customRoot, "untagged-runbook", "# Untagged Runbook\n")
+
+	cfg := config.DefaultConfig()
+	cfg.Skills.CustomDirs = []string{customRoot}
+	spec := ToolSpec{Name: "rootcause.rca_generate", ToolsetID: "rootcause", Safety: SafetyReadOnly}
+
+	guidance, err := customSkillGuidanceForTool(&cfg, spec, nil, newCustomSkillCache())
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool: %v", err)
+	}
+	if len(guidance) != 0 {
+		t.Fatalf("expected untagged custom skill to stay discoverable but uninjected, got %#v", guidance)
+	}
+}
+
+func TestCustomSkillGuidanceMatchesToolNameTokenTag(t *testing.T) {
+	customRoot := t.TempDir()
+	content := "---\ntags: [timeline]\ndescription: Timeline runbook\n---\n# Timeline Runbook\n"
+	writeMCPTestCustomSkill(t, customRoot, "timeline-runbook", content)
+
+	cfg := config.DefaultConfig()
+	cfg.Skills.CustomDirs = []string{customRoot}
+	spec := ToolSpec{Name: "rootcause.change_timeline", ToolsetID: "rootcause", Safety: SafetyReadOnly}
+
+	guidance, err := customSkillGuidanceForTool(&cfg, spec, nil, newCustomSkillCache())
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool: %v", err)
+	}
+	if len(guidance) != 1 || guidance[0].Name != "timeline-runbook" || guidance[0].Content != content {
+		t.Fatalf("expected timeline guidance from tool-name token, got %#v", guidance)
+	}
+}
+
+func TestRegistryListExposesGlobalSkillTagArguments(t *testing.T) {
+	cfg := config.DefaultConfig()
+	reg := NewRegistry(&cfg)
+	err := reg.Add(ToolSpec{
+		Name:      "demo.inspect",
+		ToolsetID: "demo",
+		Safety:    SafetyReadOnly,
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"namespace": map[string]any{"type": "string"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("add tool: %v", err)
+	}
+
+	infos := reg.List()
+	if len(infos) != 1 {
+		t.Fatalf("expected one tool, got %#v", infos)
+	}
+	props, ok := infos[0].InputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %#v", infos[0].InputSchema["properties"])
+	}
+	if _, exists := props["namespace"]; !exists {
+		t.Fatalf("expected original namespace property to be preserved: %#v", props)
+	}
+	for _, field := range []string{"skillTags", "customSkillTags"} {
+		fieldSchema, exists := props[field]
+		if !exists {
+			t.Fatalf("expected %s schema property in %#v", field, props)
+		}
+		fieldMap, ok := fieldSchema.(map[string]any)
+		if !ok {
+			t.Fatalf("expected %s schema map, got %#v", field, fieldSchema)
+		}
+		if _, exists := fieldMap["oneOf"]; !exists {
+			t.Fatalf("expected %s to accept string or string array, got %#v", field, fieldMap)
+		}
+	}
+}
+
+func TestCustomSkillGuidanceCacheRefreshesOnFileChange(t *testing.T) {
+	cache := newCustomSkillCache()
+
+	customRoot := t.TempDir()
+	skillFile := writeMCPTestCustomSkill(t, customRoot, "demo-skill", "")
+	first := "---\ntags: [demo]\ndescription: Demo guidance\n---\n# First\n"
+	err := os.WriteFile(skillFile, []byte(first), 0o600)
+	if err != nil {
+		t.Fatalf("write first skill: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Skills.CustomDirs = []string{customRoot}
+	spec := ToolSpec{Name: "demo.inspect", ToolsetID: "demo", Safety: SafetyReadOnly}
+
+	guidance, err := customSkillGuidanceForTool(&cfg, spec, nil, cache)
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool first: %v", err)
+	}
+	if len(guidance) != 1 || guidance[0].Content != first {
+		t.Fatalf("expected first guidance, got %#v", guidance)
+	}
+	cache.mu.Lock()
+	cacheEntries := len(cache.entries)
+	cache.mu.Unlock()
+	if cacheEntries != 1 {
+		t.Fatalf("expected one cache entry, got %d", cacheEntries)
+	}
+
+	second := "---\ntags: [demo]\ndescription: Demo guidance\n---\n# Second\n"
+	err = os.WriteFile(skillFile, []byte(second), 0o600)
+	if err != nil {
+		t.Fatalf("write second skill: %v", err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	err = os.Chtimes(skillFile, future, future)
+	if err != nil {
+		t.Fatalf("touch second skill: %v", err)
+	}
+
+	guidance, err = customSkillGuidanceForTool(&cfg, spec, nil, cache)
+	if err != nil {
+		t.Fatalf("customSkillGuidanceForTool second: %v", err)
+	}
+	if len(guidance) != 1 || guidance[0].Content != second {
+		t.Fatalf("expected refreshed guidance, got %#v", guidance)
+	}
+}
+
+func writeMCPTestCustomSkill(t *testing.T, root string, name string, content string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	err := os.MkdirAll(dir, 0o755)
+	if err != nil {
+		t.Fatalf("mkdir custom skill: %v", err)
+	}
+
+	file := filepath.Join(dir, "SKILL.md")
+	err = os.WriteFile(file, []byte(content), 0o600)
+	if err != nil {
+		t.Fatalf("write custom skill: %v", err)
+	}
+	return file
 }
 
 func TestInvokerRunsMutationPreflight(t *testing.T) {

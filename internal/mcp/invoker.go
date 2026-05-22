@@ -11,12 +11,13 @@ import (
 )
 
 type ToolInvoker struct {
-	reg *ToolRegistry
-	ctx ToolContext
+	reg        *ToolRegistry
+	ctx        ToolContext
+	skillCache *customSkillCache
 }
 
 func NewToolInvoker(reg *ToolRegistry, ctx ToolContext) *ToolInvoker {
-	return &ToolInvoker{reg: reg, ctx: ctx}
+	return &ToolInvoker{reg: reg, ctx: ctx, skillCache: newCustomSkillCache()}
 }
 
 func (i *ToolInvoker) Call(ctx context.Context, user policy.User, toolName string, args map[string]any) (ToolResult, error) {
@@ -70,7 +71,7 @@ func (i *ToolInvoker) Call(ctx context.Context, user policy.User, toolName strin
 		outcome = "error"
 		result.Data = canonicalErrorPayload(toolErr, result.Data)
 	}
-	guidance, guidanceErr := customSkillGuidanceForTool(i.ctx.Config, spec, args)
+	guidance, guidanceErr := customSkillGuidanceForTool(i.ctx.Config, spec, args, i.skillCache)
 	result = attachCustomSkillGuidance(result, guidance, guidanceErr)
 	logAudit(execCtx, i.ctx, spec, user.ID, result.Metadata.Namespaces, result.Metadata.Resources, outcome, toolErr)
 	return result, toolErr

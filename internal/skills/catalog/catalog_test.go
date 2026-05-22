@@ -98,7 +98,8 @@ func writeCustomSkill(t *testing.T, root string, name string, content string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir custom skill: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644); err != nil {
+	err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o600)
+	if err != nil {
 		t.Fatalf("write custom skill: %v", err)
 	}
 }

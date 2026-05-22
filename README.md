@@ -154,6 +154,17 @@ Always check the payments dashboard before declaring database root cause.
 
 RootCause matches tags on every tool call using the toolset (`rootcause`, `k8s`, `helm`), exact tool name (`rootcause.rca_generate`), tool-name tokens (`rca`, `events`, `timeline`), plus optional call arguments `skillTags` or `customSkillTags`.
 
+For all RootCause incident and issue analysis, tag the skill with `rootcause`. That applies it to every `rootcause.*` tool, including `rootcause.incident_bundle`, `rootcause.rca_generate`, `rootcause.remediation_playbook`, `rootcause.postmortem_export`, and `rootcause.change_timeline`.
+
+Use narrower tags when the guidance should only apply to part of the flow:
+
+| Goal | Recommended tags |
+|---|---|
+| All RootCause issue workflows | `[rootcause]` |
+| RCA drafting only | `[rca]` or `[rootcause.rca_generate]` |
+| Kubernetes issue analysis plus RootCause workflows | `[rootcause, k8s, incident]` |
+| A team/service-specific workflow | `[rootcause, payments]` plus pass `skillTags: ["payments"]` when needed |
+
 Sync custom skills into supported agent directories:
 
 ```bash
@@ -172,6 +183,8 @@ allow_custom_overrides = false
 MCP clients can read `skill://catalog` for the merged skill list and `skill://team-runbook` for the skill content. Custom names cannot collide with built-ins unless overrides are explicitly enabled.
 
 Every tool call includes matching tagged custom skills in response metadata/payload as `customSkillGuidance`, so MCP agents can consider team-specific runbook instructions during root-cause analysis and other workflows.
+
+Do not put secrets, credentials, kubeconfigs, tokens, or private incident data in custom `SKILL.md` files. Matching skills can be returned in MCP tool responses for the connected client to read.
 
 Agent directory defaults used by `sync-skills`:
 

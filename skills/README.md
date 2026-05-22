@@ -63,6 +63,17 @@ Tag matching is automatic for every tool call:
 
 Only tagged custom skills are injected into tool call results as `customSkillGuidance`; untagged skills remain available for sync and `skill://...` resources.
 
+For all RootCause incident and issue analysis, tag the skill with `rootcause`. That applies it to every `rootcause.*` tool, including `rootcause.incident_bundle`, `rootcause.rca_generate`, `rootcause.remediation_playbook`, `rootcause.postmortem_export`, and `rootcause.change_timeline`.
+
+Use narrower tags when the guidance should only apply to part of the flow:
+
+| Goal | Recommended tags |
+|---|---|
+| All RootCause issue workflows | `[rootcause]` |
+| RCA drafting only | `[rca]` or `[rootcause.rca_generate]` |
+| Kubernetes issue analysis plus RootCause workflows | `[rootcause, k8s, incident]` |
+| A team/service-specific workflow | `[rootcause, payments]` plus pass `skillTags: ["payments"]` when needed |
+
 Sync custom skills into agent skill folders with:
 
 ```bash
@@ -86,6 +97,8 @@ MCP clients can then read:
 - `skill://team-runbook` for a custom skill's `SKILL.md` content
 
 All tool calls include matching configured custom skills in their response metadata/payload as `customSkillGuidance`, allowing MCP agents to evaluate incidents with team-specific instructions and runbooks.
+
+Do not put secrets, credentials, kubeconfigs, tokens, or private incident data in custom `SKILL.md` files. Matching skills can be returned in MCP tool responses for the connected client to read.
 
 | Agent | Format | Project Directory |
 |---|---|---|

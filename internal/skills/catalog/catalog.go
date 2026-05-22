@@ -43,14 +43,16 @@ type CustomOptions struct {
 }
 
 func Load() (Manifest, error) {
-	var m Manifest
-	if err := json.Unmarshal(manifestBytes, &m); err != nil {
+	var manifest Manifest
+	err := json.Unmarshal(manifestBytes, &manifest)
+	if err != nil {
 		return Manifest{}, fmt.Errorf("parse skills manifest: %w", err)
 	}
-	if err := validate(m); err != nil {
+	err = validate(manifest)
+	if err != nil {
 		return Manifest{}, err
 	}
-	return m, nil
+	return manifest, nil
 }
 
 func LoadWithCustom(opts CustomOptions) (Manifest, error) {
@@ -156,22 +158,22 @@ func Merge(builtin []Skill, custom []Skill, allowOverrides bool) ([]Skill, error
 	return merged, nil
 }
 
-func validate(m Manifest) error {
-	if strings.TrimSpace(m.SchemaVersion) == "" {
+func validate(manifest Manifest) error {
+	if strings.TrimSpace(manifest.SchemaVersion) == "" {
 		return fmt.Errorf("skills manifest missing schemaVersion")
 	}
-	if len(m.Skills) == 0 {
+	if len(manifest.Skills) == 0 {
 		return fmt.Errorf("skills manifest has no skills")
 	}
 	seen := map[string]struct{}{}
-	for _, s := range m.Skills {
-		if strings.TrimSpace(s.Name) == "" || strings.TrimSpace(s.Path) == "" {
+	for _, skill := range manifest.Skills {
+		if strings.TrimSpace(skill.Name) == "" || strings.TrimSpace(skill.Path) == "" {
 			return fmt.Errorf("invalid skill entry: name/path required")
 		}
-		if _, ok := seen[s.Name]; ok {
-			return fmt.Errorf("duplicate skill in manifest: %s", s.Name)
+		if _, ok := seen[skill.Name]; ok {
+			return fmt.Errorf("duplicate skill in manifest: %s", skill.Name)
 		}
-		seen[s.Name] = struct{}{}
+		seen[skill.Name] = struct{}{}
 	}
 	return nil
 }
@@ -239,7 +241,7 @@ func customDescription(data []byte, file string) string {
 			return strings.TrimSpace(title)
 		}
 	}
-	return fmt.Sprintf("Custom skill from %s", file)
+	return "Custom skill from " + file
 }
 
 func parseSkillFrontMatter(data []byte) (skillFrontMatter, []byte) {

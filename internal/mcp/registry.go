@@ -86,10 +86,7 @@ func (r *ToolRegistry) allowedBySafety(spec ToolSpec) bool {
 	}
 	if r.cfg.DisableDestructive {
 		if spec.Safety == SafetyDestructive || spec.Safety == SafetyRiskyWrite {
-			if slices.Contains(r.cfg.Safety.AllowDestructiveTools, spec.Name) {
-				return true
-			}
-			return false
+			return slices.Contains(r.cfg.Safety.AllowDestructiveTools, spec.Name)
 		}
 	}
 	return true
