@@ -8,20 +8,23 @@ import (
 	"time"
 
 	"cloud.google.com/go/logging"
-	"cloud.google.com/go/logging/logadmin"
-	"google.golang.org/api/iterator"
 
 	"rootcause/internal/mcp"
+	"rootcause/toolsets/gcp/monitoring"
 )
 
 type Service struct {
 	ctx       mcp.ToolContext
 	toolsetID string
-	logClient func(context.Context, string) (*logadmin.Client, string, error)
+	api       API
+	// metricsAPI is used by gcp.logs.error_timeline to compute accurate
+	// bucketed counts from the Cloud Monitoring `log_entry_count` metric
+	// rather than paginating Cloud Logging entries (which is bounded).
+	metricsAPI monitoring.API
 }
 
-func ToolSpecs(ctx mcp.ToolContext, toolsetID string, logClient func(context.Context, string) (*logadmin.Client, string, error)) []mcp.ToolSpec {
-	svc := &Service{ctx: ctx, toolsetID: toolsetID, logClient: logClient}
+func ToolSpecs(ctx mcp.ToolContext, toolsetID string, api API, metricsAPI monitoring.API) []mcp.ToolSpec {
+	svc := &Service{ctx: ctx, toolsetID: toolsetID, api: api, metricsAPI: metricsAPI}
 	return []mcp.ToolSpec{
 		{
 			Name:        "gcp.logs.query",
@@ -41,7 +44,7 @@ func ToolSpecs(ctx mcp.ToolContext, toolsetID string, logClient func(context.Con
 		},
 		{
 			Name:        "gcp.logs.error_timeline",
-			Description: "Bucketed error/warning counts over a time window for a workload (or raw filter). Useful for spotting an inflection point.",
+			Description: "Bucketed error/warning counts over a time window for a k8s_container workload, computed from the Cloud Monitoring `logging.googleapis.com/log_entry_count` metric. Accurate (not pagination-bounded) and includes per-severity breakdown per bucket.",
 			ToolsetID:   toolsetID,
 			InputSchema: schemaErrorTimeline(),
 			Safety:      mcp.SafetyReadOnly,
@@ -68,12 +71,8 @@ func (s *Service) handleQuery(ctx context.Context, req mcp.ToolRequest) (mcp.Too
 	window := parseDuration(toString(req.Arguments["duration"]), 30*time.Minute)
 	limit := toInt(req.Arguments["limit"], 100)
 
-	client, usedProject, err := s.logClient(ctx, project)
-	if err != nil {
-		return errorResult(err), err
-	}
 	finalFilter := withinWindow(filter, window)
-	entries, err := fetchEntries(ctx, client, finalFilter, limit)
+	entries, usedProject, err := s.api.FetchEntries(ctx, project, finalFilter, limit)
 	if err != nil {
 		return errorResult(err), err
 	}
@@ -100,12 +99,8 @@ func (s *Service) handleWorkload(ctx context.Context, req mcp.ToolRequest) (mcp.
 	window := parseDuration(toString(req.Arguments["duration"]), 30*time.Minute)
 	limit := toInt(req.Arguments["limit"], 100)
 
-	client, usedProject, err := s.logClient(ctx, project)
-	if err != nil {
-		return errorResult(err), err
-	}
 	filter := workloadFilter(namespace, workload, severity, window)
-	entries, err := fetchEntries(ctx, client, filter, limit)
+	entries, usedProject, err := s.api.FetchEntries(ctx, project, filter, limit)
 	if err != nil {
 		return errorResult(err), err
 	}
@@ -126,46 +121,34 @@ func (s *Service) handleWorkload(ctx context.Context, req mcp.ToolRequest) (mcp.
 }
 
 func (s *Service) handleErrorTimeline(ctx context.Context, req mcp.ToolRequest) (mcp.ToolResult, error) {
+	if s.metricsAPI == nil {
+		err := fmt.Errorf("metrics API is unavailable; error_timeline requires the gcp.metrics service to be initialized")
+		return errorResult(err), err
+	}
 	project := toString(req.Arguments["projectId"])
 	namespace := strings.TrimSpace(toString(req.Arguments["namespace"]))
 	workload := strings.TrimSpace(toString(req.Arguments["workload"]))
-	rawFilter := strings.TrimSpace(toString(req.Arguments["filter"]))
 	severity := strings.ToUpper(strings.TrimSpace(toString(req.Arguments["severity"])))
 	if severity == "" {
 		severity = "ERROR"
+	}
+	if namespace == "" {
+		err := fmt.Errorf("namespace is required")
+		return errorResult(err), err
 	}
 	window := parseDuration(toString(req.Arguments["duration"]), time.Hour)
 	bucketSize := parseDuration(toString(req.Arguments["bucketSize"]), 5*time.Minute)
 	if bucketSize <= 0 {
 		bucketSize = 5 * time.Minute
 	}
-	scanLimit := toInt(req.Arguments["scanLimit"], 1000)
-	if scanLimit <= 0 || scanLimit > 5000 {
-		scanLimit = 1000
-	}
 
-	var filter string
-	switch {
-	case rawFilter != "":
-		filter = withinWindow(rawFilter, window)
-	case namespace != "" && workload != "":
-		filter = workloadFilter(namespace, workload, severity, window)
-	case namespace != "":
-		base := fmt.Sprintf(
-			`resource.type="k8s_container" AND resource.labels.namespace_name="%s" AND severity>=%s`,
-			escape(namespace), severity,
-		)
-		filter = withinWindow(base, window)
-	default:
-		err := fmt.Errorf("provide either filter, or namespace (optionally with workload)")
-		return errorResult(err), err
-	}
-
-	client, usedProject, err := s.logClient(ctx, project)
+	severities, err := severitiesAtOrAbove(severity)
 	if err != nil {
 		return errorResult(err), err
 	}
-	entries, err := fetchEntries(ctx, client, filter, scanLimit)
+
+	mql := errorTimelineMQL(namespace, workload, severities, window, bucketSize)
+	series, usedProject, err := s.metricsAPI.RunMQL(ctx, project, mql)
 	if err != nil {
 		return errorResult(err), err
 	}
@@ -173,28 +156,28 @@ func (s *Service) handleErrorTimeline(ctx context.Context, req mcp.ToolRequest) 
 	now := time.Now().UTC()
 	end := now.Truncate(bucketSize).Add(bucketSize)
 	start := end.Add(-window).Truncate(bucketSize)
-	buckets := bucketize(entries, start, end, bucketSize)
-	severityCounts := tallySeverity(entries)
+	buckets, totalCount, severityCounts := bucketizeFromTimeSeries(series, start, end, bucketSize)
+
 	resources := []string{}
-	if namespace != "" && workload != "" {
+	if workload != "" {
 		resources = append(resources, fmt.Sprintf("%s/%s", namespace, workload))
 	}
-
+	out := map[string]any{
+		"project":        usedProject,
+		"namespace":      namespace,
+		"workload":       workload,
+		"severity":       severity,
+		"window":         window.String(),
+		"bucketSize":     bucketSize.String(),
+		"source":         "logging.googleapis.com/log_entry_count",
+		"mql":            mql,
+		"buckets":        buckets,
+		"bucketCount":    len(buckets),
+		"totalCount":     totalCount,
+		"severityCounts": severityCounts,
+	}
 	return mcp.ToolResult{
-		Data: map[string]any{
-			"project":        usedProject,
-			"namespace":      namespace,
-			"workload":       workload,
-			"severity":       severity,
-			"window":         window.String(),
-			"bucketSize":     bucketSize.String(),
-			"filter":         filter,
-			"buckets":        buckets,
-			"bucketCount":    len(buckets),
-			"totalCount":     len(entries),
-			"severityCounts": severityCounts,
-			"truncated":      len(entries) >= scanLimit,
-		},
+		Data:     out,
 		Metadata: mcp.ToolMetadata{Namespaces: nonEmptyList(namespace), Resources: resources},
 	}, nil
 }
@@ -216,7 +199,7 @@ func (s *Service) handleCorrelatedWithBundle(ctx context.Context, req mcp.ToolRe
 		if endRaw == "" {
 			endRaw = strings.TrimSpace(toString(bundle["endTime"]))
 		}
-		if (startRaw == "" || endRaw == "") {
+		if startRaw == "" || endRaw == "" {
 			s, e := extractBundleWindow(bundle)
 			if startRaw == "" && !s.IsZero() {
 				startRaw = s.Format(time.RFC3339)
@@ -243,11 +226,7 @@ func (s *Service) handleCorrelatedWithBundle(ctx context.Context, req mcp.ToolRe
 	}
 
 	filter := bundleWindowFilter(namespace, workload, severity, startT, endT)
-	client, usedProject, err := s.logClient(ctx, project)
-	if err != nil {
-		return errorResult(err), err
-	}
-	entries, err := fetchEntries(ctx, client, filter, limit)
+	entries, usedProject, err := s.api.FetchEntries(ctx, project, filter, limit)
 	if err != nil {
 		return errorResult(err), err
 	}
@@ -271,29 +250,8 @@ func (s *Service) handleCorrelatedWithBundle(ctx context.Context, req mcp.ToolRe
 	}, nil
 }
 
-func fetchEntries(ctx context.Context, client *logadmin.Client, filter string, limit int) ([]map[string]any, error) {
-	if client == nil {
-		return nil, fmt.Errorf("logging client is nil")
-	}
-	if limit <= 0 || limit > 5000 {
-		limit = 100
-	}
-	it := client.Entries(ctx, logadmin.Filter(filter), logadmin.NewestFirst())
-	out := make([]map[string]any, 0, limit)
-	for len(out) < limit {
-		entry, err := it.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return out, err
-		}
-		out = append(out, encodeEntry(entry))
-	}
-	return out, nil
-}
-
-func encodeEntry(entry *logging.Entry) map[string]any {
+// EncodeEntry is exported so the SDK adapter can reuse the flattening logic.
+func EncodeEntry(entry *logging.Entry) map[string]any {
 	if entry == nil {
 		return nil
 	}
@@ -420,38 +378,9 @@ func parseTime(raw string) (time.Time, error) {
 
 func extractBundleWindow(bundle map[string]any) (time.Time, time.Time) {
 	var earliest, latest time.Time
-	sections, ok := bundle["sections"].(map[string]any)
-	if !ok {
-		return earliest, latest
-	}
-	events, _ := sections["eventsTimeline"].(map[string]any)
-	if events == nil {
-		return earliest, latest
-	}
-	timeline, _ := events["timeline"].([]any)
-	if len(timeline) == 0 {
-		if generic, okGen := events["timeline"].([]map[string]any); okGen {
-			for _, item := range generic {
-				if t, err := parseTime(toString(item["time"])); err == nil {
-					if earliest.IsZero() || t.Before(earliest) {
-						earliest = t
-					}
-					if latest.IsZero() || t.After(latest) {
-						latest = t
-					}
-				}
-			}
-		}
-		return earliest, latest
-	}
-	for _, raw := range timeline {
-		item, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		t, err := parseTime(toString(item["time"]))
-		if err != nil {
-			continue
+	observe := func(t time.Time) {
+		if t.IsZero() {
+			return
 		}
 		if earliest.IsZero() || t.Before(earliest) {
 			earliest = t
@@ -460,43 +389,151 @@ func extractBundleWindow(bundle map[string]any) (time.Time, time.Time) {
 			latest = t
 		}
 	}
+	scanTimes(bundle["startTime"], observe)
+	scanTimes(bundle["endTime"], observe)
+	sections, ok := bundle["sections"].(map[string]any)
+	if !ok {
+		return earliest, latest
+	}
+	if events, _ := sections["eventsTimeline"].(map[string]any); events != nil {
+		scanTimelineEntries(events["timeline"], "time", observe)
+	}
+	if helm, _ := sections["helmReleases"].(map[string]any); helm != nil {
+		scanTimelineEntries(helm["releases"], "updated", observe)
+	}
 	return earliest, latest
 }
 
-func bucketize(entries []map[string]any, start, end time.Time, bucketSize time.Duration) []map[string]any {
-	if bucketSize <= 0 || !start.Before(end) {
-		return nil
+func scanTimelineEntries(value any, timeKey string, observe func(time.Time)) {
+	switch list := value.(type) {
+	case []any:
+		for _, raw := range list {
+			if item, ok := raw.(map[string]any); ok {
+				if t, err := parseTime(toString(item[timeKey])); err == nil {
+					observe(t)
+				}
+			}
+		}
+	case []map[string]any:
+		for _, item := range list {
+			if t, err := parseTime(toString(item[timeKey])); err == nil {
+				observe(t)
+			}
+		}
 	}
+}
+
+func scanTimes(value any, observe func(time.Time)) {
+	if raw := strings.TrimSpace(toString(value)); raw != "" {
+		if t, err := parseTime(raw); err == nil {
+			observe(t)
+		}
+	}
+}
+
+// errorTimelineMQL builds the MQL query that produces per-bucket, per-severity
+// log entry counts from the Cloud Monitoring `log_entry_count` metric.
+func errorTimelineMQL(namespace, workload string, severities []string, window, bucketSize time.Duration) string {
+	filterParts := []string{
+		fmt.Sprintf("resource.namespace_name == '%s'", escape(namespace)),
+	}
+	if workload != "" {
+		filterParts = append(filterParts, fmt.Sprintf("(resource.pod_name =~ '%s-.*')", escape(workload)))
+	}
+	severityClauses := make([]string, 0, len(severities))
+	for _, s := range severities {
+		severityClauses = append(severityClauses, fmt.Sprintf("metric.severity == '%s'", s))
+	}
+	severityFilter := strings.Join(severityClauses, " || ")
+
+	return fmt.Sprintf(
+		"fetch k8s_container::logging.googleapis.com/log_entry_count | filter %s | filter %s | align delta(%s) | every %s | group_by [metric.severity], sum(val()) | within %s",
+		strings.Join(filterParts, " && "),
+		severityFilter,
+		monitoring.DurationLiteral(bucketSize),
+		monitoring.DurationLiteral(bucketSize),
+		monitoring.DurationLiteral(window),
+	)
+}
+
+// severitiesAtOrAbove returns the ordered list of severities at or above min.
+func severitiesAtOrAbove(min string) ([]string, error) {
+	order := []string{"DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"}
+	min = strings.ToUpper(strings.TrimSpace(min))
+	idx := -1
+	for i, s := range order {
+		if s == min {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("invalid severity %q (expected one of %s)", min, strings.Join(order, "/"))
+	}
+	return order[idx:], nil
+}
+
+// bucketizeFromTimeSeries flattens MQL time-series output into per-bucket counts
+// keyed by RFC3339 bucket start. Each series carries a metric.severity label
+// in labelValues[0] (single label group_by) which we use for the breakdown.
+func bucketizeFromTimeSeries(series []map[string]any, start, end time.Time, bucketSize time.Duration) ([]map[string]any, int, map[string]int) {
 	bucketCount := int(end.Sub(start) / bucketSize)
 	if bucketCount <= 0 {
-		return nil
+		return nil, 0, map[string]int{}
 	}
 	counts := make([]int, bucketCount)
 	severityByBucket := make([]map[string]int, bucketCount)
 	for i := range severityByBucket {
 		severityByBucket[i] = map[string]int{}
 	}
-	for _, e := range entries {
-		t, err := parseTime(toString(e["timestamp"]))
-		if err != nil {
-			continue
+	severityTotals := map[string]int{}
+	total := 0
+
+	for _, ts := range series {
+		severity := "DEFAULT"
+		if labels, ok := ts["labelValues"].([]string); ok && len(labels) > 0 {
+			severity = labels[0]
+		} else if labels, ok := ts["labelValues"].([]any); ok && len(labels) > 0 {
+			if s, ok := labels[0].(string); ok {
+				severity = s
+			}
 		}
-		if t.Before(start) || !t.Before(end) {
-			continue
+		points, _ := ts["points"].([]map[string]any)
+		if points == nil {
+			if generic, ok := ts["points"].([]any); ok {
+				for _, p := range generic {
+					if m, ok := p.(map[string]any); ok {
+						points = append(points, m)
+					}
+				}
+			}
 		}
-		idx := int(t.Sub(start) / bucketSize)
-		if idx < 0 || idx >= bucketCount {
-			continue
+		for _, p := range points {
+			pt, err := parseTime(toString(p["start"]))
+			if err != nil {
+				if pt2, err2 := parseTime(toString(p["end"])); err2 == nil {
+					pt = pt2.Add(-bucketSize)
+				} else {
+					continue
+				}
+			}
+			if pt.Before(start) || !pt.Before(end) {
+				continue
+			}
+			idx := int(pt.Sub(start) / bucketSize)
+			if idx < 0 || idx >= bucketCount {
+				continue
+			}
+			count := int(numericValue(p["value"]))
+			counts[idx] += count
+			severityByBucket[idx][severity] += count
+			severityTotals[severity] += count
+			total += count
 		}
-		counts[idx]++
-		sev := strings.ToUpper(strings.TrimSpace(toString(e["severity"])))
-		if sev == "" {
-			sev = "DEFAULT"
-		}
-		severityByBucket[idx][sev]++
 	}
+
 	out := make([]map[string]any, 0, bucketCount)
-	for i := 0; i < bucketCount; i++ {
+	for i := range bucketCount {
 		bucketStart := start.Add(time.Duration(i) * bucketSize)
 		out = append(out, map[string]any{
 			"bucketStart":       bucketStart.Format(time.RFC3339),
@@ -505,19 +542,19 @@ func bucketize(entries []map[string]any, start, end time.Time, bucketSize time.D
 			"severityBreakdown": severityByBucket[i],
 		})
 	}
-	return out
+	return out, total, severityTotals
 }
 
-func tallySeverity(entries []map[string]any) map[string]int {
-	out := map[string]int{}
-	for _, e := range entries {
-		sev := strings.ToUpper(strings.TrimSpace(toString(e["severity"])))
-		if sev == "" {
-			sev = "DEFAULT"
-		}
-		out[sev]++
+func numericValue(v any) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
 	}
-	return out
+	return 0
 }
 
 func nonEmptyList(values ...string) []string {
@@ -574,7 +611,7 @@ func schemaQuery() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"filter":    map[string]any{"type": "string", "description": "Cloud Logging Query Language filter expression."},
 			"duration":  map[string]any{"type": "string", "description": "Window duration (e.g. '15m', '1h'). Default 30m."},
 			"limit":     map[string]any{"type": "integer", "description": "Max entries to return (default 100, max 500)."},
@@ -588,7 +625,7 @@ func schemaWorkload() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace."},
 			"workload":  map[string]any{"type": "string", "description": "Workload name."},
 			"severity":  map[string]any{"type": "string", "description": "Minimum severity (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL). Default WARNING."},
@@ -604,15 +641,14 @@ func schemaErrorTimeline() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId":  map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
-			"namespace":  map[string]any{"type": "string", "description": "Kubernetes namespace. Required unless `filter` is supplied."},
+			"projectId":  map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
+			"namespace":  map[string]any{"type": "string", "description": "Kubernetes namespace (required)."},
 			"workload":   map[string]any{"type": "string", "description": "Optional workload name to narrow to a single deployment/statefulset."},
-			"severity":   map[string]any{"type": "string", "description": "Minimum severity (default ERROR)."},
+			"severity":   map[string]any{"type": "string", "description": "Minimum severity (default ERROR). Counts include this severity and all above."},
 			"duration":   map[string]any{"type": "string", "description": "Window duration. Default 1h."},
 			"bucketSize": map[string]any{"type": "string", "description": "Bucket size (e.g. '1m', '5m'). Default 5m."},
-			"filter":     map[string]any{"type": "string", "description": "Raw Cloud Logging filter override. Mutually exclusive with namespace/workload."},
-			"scanLimit":  map[string]any{"type": "integer", "description": "Max entries to scan into buckets (default 1000, max 5000)."},
 		},
+		"required":             []string{"namespace"},
 		"additionalProperties": true,
 	}
 }
@@ -621,7 +657,7 @@ func schemaCorrelatedWithBundle() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"bundle":    map[string]any{"type": "object", "description": "Optional rootcause incident bundle. Namespace and time window are auto-derived when present."},
 			"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace. Required unless derivable from `bundle`."},
 			"workload":  map[string]any{"type": "string", "description": "Optional workload name."},

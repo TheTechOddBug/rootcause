@@ -154,6 +154,7 @@ func schemaRCAGenerate() map[string]any {
 			"bundle":          map[string]any{"type": "object"},
 			"namespace":       map[string]any{"type": "string"},
 			"keyword":         map[string]any{"type": "string"},
+			"workload":        map[string]any{"type": "string", "description": "Optional workload; forwarded to the auto-built incident_bundle so GCP metrics/logs steps trigger when the GCP toolset is enabled."},
 			"incidentSummary": map[string]any{"type": "string"},
 		},
 	}
@@ -167,6 +168,7 @@ func schemaRemediationPlaybook() map[string]any {
 			"rca":                 map[string]any{"type": "object"},
 			"namespace":           map[string]any{"type": "string"},
 			"keyword":             map[string]any{"type": "string"},
+			"workload":            map[string]any{"type": "string", "description": "Optional workload; forwarded to the auto-built incident_bundle so GCP metrics/logs steps trigger when the GCP toolset is enabled."},
 			"maxImmediateActions": map[string]any{"type": "number"},
 		},
 	}
@@ -180,6 +182,7 @@ func schemaPostmortemExport() map[string]any {
 			"rca":             map[string]any{"type": "object"},
 			"namespace":       map[string]any{"type": "string"},
 			"keyword":         map[string]any{"type": "string"},
+			"workload":        map[string]any{"type": "string", "description": "Optional workload; forwarded to the auto-built incident_bundle so GCP metrics/logs steps trigger when the GCP toolset is enabled."},
 			"incidentSummary": map[string]any{"type": "string"},
 			"format":          map[string]any{"type": "string", "enum": []string{"json", "markdown"}},
 		},

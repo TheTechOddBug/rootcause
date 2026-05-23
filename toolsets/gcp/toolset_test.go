@@ -39,7 +39,7 @@ func TestToolsetRegistersExpectedTools(t *testing.T) {
 		"gcp.metrics.query",
 		"gcp.metrics.workload",
 		"gcp.metrics.list_descriptors",
-		"gcp.metrics.slo_status",
+		"gcp.metrics.slo_list",
 		"gcp.logs.query",
 		"gcp.logs.workload",
 		"gcp.logs.error_timeline",

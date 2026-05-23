@@ -50,12 +50,14 @@ func (t *Toolset) Init(ctx mcp.ToolContext) error {
 }
 
 func (t *Toolset) Register(reg mcp.Registry) error {
-	for _, tool := range gcpmonitoring.ToolSpecs(t.ctx, t.ID(), t.queryClient, t.metricClient, t.slmClient) {
+	metricsAPI := newSDKMetricsAPI(t)
+	loggingAPI := newSDKLoggingAPI(t)
+	for _, tool := range gcpmonitoring.ToolSpecs(t.ctx, t.ID(), metricsAPI) {
 		if err := reg.Add(tool); err != nil {
 			return fmt.Errorf("register %s: %w", tool.Name, err)
 		}
 	}
-	for _, tool := range gcplogging.ToolSpecs(t.ctx, t.ID(), t.logClient) {
+	for _, tool := range gcplogging.ToolSpecs(t.ctx, t.ID(), loggingAPI, metricsAPI) {
 		if err := reg.Add(tool); err != nil {
 			return fmt.Errorf("register %s: %w", tool.Name, err)
 		}
@@ -64,9 +66,9 @@ func (t *Toolset) Register(reg mcp.Registry) error {
 }
 
 func (t *Toolset) loadClient(ctx context.Context, service, projectExplicit string, build func(ctx context.Context, project string, opts []option.ClientOption) (any, error)) (any, string, error) {
-	project := gcpcfg.ResolveProjectWithKubeconfig(projectExplicit)
+	project := gcpcfg.ResolveProject(projectExplicit)
 	if project == "" {
-		return nil, "", errors.New("gcp project id is required (set GOOGLE_CLOUD_PROJECT, pass projectId, or use a GKE kubeconfig context)")
+		return nil, "", errors.New("gcp project id is required: pass projectId or set GOOGLE_CLOUD_PROJECT / GCP_PROJECT (observability project is independent of the cluster's control plane — EKS/AKS clusters can also ship to GCP)")
 	}
 	fullKey := service + "|" + project
 	if raw, ok := t.cache.Load(fullKey); ok {

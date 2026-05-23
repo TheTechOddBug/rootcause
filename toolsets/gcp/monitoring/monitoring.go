@@ -6,36 +6,20 @@ import (
 	"strings"
 	"time"
 
-	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	monitoringpb "cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
-	"google.golang.org/api/iterator"
 	label "google.golang.org/genproto/googleapis/api/label"
 
 	"rootcause/internal/mcp"
 )
 
 type Service struct {
-	ctx          mcp.ToolContext
-	toolsetID    string
-	queryClient  func(context.Context, string) (*monitoring.QueryClient, string, error)
-	metricClient func(context.Context, string) (*monitoring.MetricClient, string, error)
-	slmClient    func(context.Context, string) (*monitoring.ServiceMonitoringClient, string, error)
+	ctx       mcp.ToolContext
+	toolsetID string
+	api       API
 }
 
-func ToolSpecs(
-	ctx mcp.ToolContext,
-	toolsetID string,
-	queryClient func(context.Context, string) (*monitoring.QueryClient, string, error),
-	metricClient func(context.Context, string) (*monitoring.MetricClient, string, error),
-	slmClient func(context.Context, string) (*monitoring.ServiceMonitoringClient, string, error),
-) []mcp.ToolSpec {
-	svc := &Service{
-		ctx:          ctx,
-		toolsetID:    toolsetID,
-		queryClient:  queryClient,
-		metricClient: metricClient,
-		slmClient:    slmClient,
-	}
+func ToolSpecs(ctx mcp.ToolContext, toolsetID string, api API) []mcp.ToolSpec {
+	svc := &Service{ctx: ctx, toolsetID: toolsetID, api: api}
 	return []mcp.ToolSpec{
 		{
 			Name:        "gcp.metrics.query",
@@ -62,12 +46,12 @@ func ToolSpecs(
 			Handler:     svc.handleListDescriptors,
 		},
 		{
-			Name:        "gcp.metrics.slo_status",
-			Description: "List Service Monitoring services and their Service Level Objectives (goal, period, indicator type).",
+			Name:        "gcp.metrics.slo_list",
+			Description: "Enumerate Service Monitoring services and their Service Level Objectives (goal, period, indicator type). Configuration listing only — live burn-rate computation is out of scope.",
 			ToolsetID:   toolsetID,
-			InputSchema: schemaSLOStatus(),
+			InputSchema: schemaSLOList(),
 			Safety:      mcp.SafetyReadOnly,
-			Handler:     svc.handleSLOStatus,
+			Handler:     svc.handleSLOList,
 		},
 	}
 }
@@ -79,11 +63,7 @@ func (s *Service) handleQuery(ctx context.Context, req mcp.ToolRequest) (mcp.Too
 		err := fmt.Errorf("query is required")
 		return errorResult(err), err
 	}
-	client, usedProject, err := s.queryClient(ctx, project)
-	if err != nil {
-		return errorResult(err), err
-	}
-	series, err := runMQL(ctx, client, usedProject, query)
+	series, usedProject, err := s.api.RunMQL(ctx, project, query)
 	if err != nil {
 		return errorResult(err), err
 	}
@@ -105,13 +85,9 @@ func (s *Service) handleWorkload(ctx context.Context, req mcp.ToolRequest) (mcp.
 	}
 	window := parseDuration(toString(req.Arguments["duration"]), 30*time.Minute)
 
-	client, usedProject, err := s.queryClient(ctx, project)
-	if err != nil {
-		return errorResult(err), err
-	}
-	cpu, cpuErr := runMQL(ctx, client, usedProject, workloadCPUQuery(namespace, workload, window))
-	memory, memErr := runMQL(ctx, client, usedProject, workloadMemoryQuery(namespace, workload, window))
-	restarts, restartErr := runMQL(ctx, client, usedProject, workloadRestartQuery(namespace, workload, window))
+	cpu, usedProject, cpuErr := s.api.RunMQL(ctx, project, workloadCPUQuery(namespace, workload, window))
+	memory, _, memErr := s.api.RunMQL(ctx, project, workloadMemoryQuery(namespace, workload, window))
+	restarts, _, restartErr := s.api.RunMQL(ctx, project, workloadRestartQuery(namespace, workload, window))
 
 	out := map[string]any{
 		"project":   usedProject,
@@ -151,36 +127,9 @@ func (s *Service) handleListDescriptors(ctx context.Context, req mcp.ToolRequest
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	client, usedProject, err := s.metricClient(ctx, project)
+	descriptors, usedProject, err := s.api.ListDescriptors(ctx, project, filter, limit)
 	if err != nil {
 		return errorResult(err), err
-	}
-	if client == nil {
-		err := fmt.Errorf("metric client is nil")
-		return errorResult(err), err
-	}
-	it := client.ListMetricDescriptors(ctx, &monitoringpb.ListMetricDescriptorsRequest{
-		Name:   "projects/" + usedProject,
-		Filter: filter,
-	})
-	descriptors := make([]map[string]any, 0, limit)
-	for len(descriptors) < limit {
-		md, err := it.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return errorResult(err), err
-		}
-		descriptors = append(descriptors, map[string]any{
-			"type":        md.GetType(),
-			"displayName": md.GetDisplayName(),
-			"description": md.GetDescription(),
-			"unit":        md.GetUnit(),
-			"metricKind":  md.GetMetricKind().String(),
-			"valueType":   md.GetValueType().String(),
-			"labels":      encodeLabelDescriptors(md.GetLabels()),
-		})
 	}
 	return mcp.ToolResult{Data: map[string]any{
 		"project":     usedProject,
@@ -190,69 +139,48 @@ func (s *Service) handleListDescriptors(ctx context.Context, req mcp.ToolRequest
 	}}, nil
 }
 
-func (s *Service) handleSLOStatus(ctx context.Context, req mcp.ToolRequest) (mcp.ToolResult, error) {
+func (s *Service) handleSLOList(ctx context.Context, req mcp.ToolRequest) (mcp.ToolResult, error) {
 	project := toString(req.Arguments["projectId"])
 	serviceFilter := strings.TrimSpace(toString(req.Arguments["serviceId"]))
 	limit := toInt(req.Arguments["limit"], 50)
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	client, usedProject, err := s.slmClient(ctx, project)
-	if err != nil {
-		return errorResult(err), err
-	}
-	if client == nil {
-		err := fmt.Errorf("service monitoring client is nil")
-		return errorResult(err), err
-	}
 
-	services := make([]map[string]any, 0)
+	var services []map[string]any
+	var usedProject string
+	var err error
 	if serviceFilter != "" {
-		services = append(services, map[string]any{
-			"id":          serviceFilter,
-			"name":        fmt.Sprintf("projects/%s/services/%s", usedProject, serviceFilter),
-			"displayName": "",
-		})
+		usedProject = project
+		// Caller passed a specific service ID; build the canonical name. We
+		// still need a resolved project, so route through ListServices with
+		// limit 0 to surface project resolution errors consistently.
+		_, resolvedProject, lookupErr := s.api.ListServices(ctx, project, 1)
+		if lookupErr != nil {
+			return errorResult(lookupErr), lookupErr
+		}
+		usedProject = resolvedProject
+		services = []map[string]any{
+			{
+				"id":          serviceFilter,
+				"name":        fmt.Sprintf("projects/%s/services/%s", usedProject, serviceFilter),
+				"displayName": "",
+			},
+		}
 	} else {
-		svcIt := client.ListServices(ctx, &monitoringpb.ListServicesRequest{
-			Parent: "projects/" + usedProject,
-		})
-		for len(services) < limit {
-			svc, err := svcIt.Next()
-			if err == iterator.Done {
-				break
-			}
-			if err != nil {
-				return errorResult(err), err
-			}
-			services = append(services, map[string]any{
-				"name":        svc.GetName(),
-				"id":          serviceIDFromName(svc.GetName()),
-				"displayName": svc.GetDisplayName(),
-			})
+		services, usedProject, err = s.api.ListServices(ctx, project, limit)
+		if err != nil {
+			return errorResult(err), err
 		}
 	}
 
 	totalSLOs := 0
 	for _, svc := range services {
 		parent := toString(svc["name"])
-		objIt := client.ListServiceLevelObjectives(ctx, &monitoringpb.ListServiceLevelObjectivesRequest{
-			Parent: parent,
-		})
-		objs := make([]map[string]any, 0)
-		for {
-			obj, err := objIt.Next()
-			if err == iterator.Done {
-				break
-			}
-			if err != nil {
-				svc["error"] = err.Error()
-				break
-			}
-			objs = append(objs, encodeSLO(obj))
-			if len(objs) >= limit {
-				break
-			}
+		objs, err := s.api.ListSLOs(ctx, parent, limit)
+		if err != nil {
+			svc["error"] = err.Error()
+			continue
 		}
 		svc["objectives"] = objs
 		svc["objectiveCount"] = len(objs)
@@ -260,39 +188,15 @@ func (s *Service) handleSLOStatus(ctx context.Context, req mcp.ToolRequest) (mcp
 	}
 
 	return mcp.ToolResult{Data: map[string]any{
-		"project":       usedProject,
-		"services":      services,
-		"serviceCount":  len(services),
+		"project":        usedProject,
+		"services":       services,
+		"serviceCount":   len(services),
 		"objectiveCount": totalSLOs,
 	}}, nil
 }
 
-func runMQL(ctx context.Context, client *monitoring.QueryClient, project, mql string) ([]map[string]any, error) {
-	if client == nil {
-		return nil, fmt.Errorf("monitoring query client is nil")
-	}
-	it := client.QueryTimeSeries(ctx, &monitoringpb.QueryTimeSeriesRequest{
-		Name:  "projects/" + project,
-		Query: mql,
-	})
-	out := make([]map[string]any, 0)
-	for {
-		resp, err := it.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return out, err
-		}
-		out = append(out, encodeTimeSeriesData(resp))
-		if len(out) >= 200 {
-			break
-		}
-	}
-	return out, nil
-}
-
-func encodeTimeSeriesData(ts *monitoringpb.TimeSeriesData) map[string]any {
+// EncodeTimeSeriesData is exported for the SDK adapter to convert raw API responses.
+func EncodeTimeSeriesData(ts *monitoringpb.TimeSeriesData) map[string]any {
 	labels := make([]string, 0, len(ts.LabelValues))
 	for _, lv := range ts.LabelValues {
 		labels = append(labels, lv.GetStringValue())
@@ -335,7 +239,8 @@ func encodeTypedValue(tv *monitoringpb.TypedValue) any {
 	}
 }
 
-func encodeLabelDescriptors(labels []*label.LabelDescriptor) []map[string]any {
+// EncodeLabelDescriptors is exported for the SDK adapter.
+func EncodeLabelDescriptors(labels []*label.LabelDescriptor) []map[string]any {
 	out := make([]map[string]any, 0, len(labels))
 	for _, l := range labels {
 		out = append(out, map[string]any{
@@ -345,6 +250,36 @@ func encodeLabelDescriptors(labels []*label.LabelDescriptor) []map[string]any {
 		})
 	}
 	return out
+}
+
+// EncodeMetricDescriptor flattens a MetricDescriptor for tool output.
+func EncodeMetricDescriptor(md MetricDescriptorView) map[string]any {
+	return map[string]any{
+		"type":        md.Type,
+		"displayName": md.DisplayName,
+		"description": md.Description,
+		"unit":        md.Unit,
+		"metricKind":  md.MetricKind,
+		"valueType":   md.ValueType,
+		"labels":      md.Labels,
+	}
+}
+
+// MetricDescriptorView is a flat representation used by the SDK adapter to
+// avoid leaking proto types into the handler signatures.
+type MetricDescriptorView struct {
+	Type        string
+	DisplayName string
+	Description string
+	Unit        string
+	MetricKind  string
+	ValueType   string
+	Labels      []map[string]any
+}
+
+// EncodeSLO is exported so the SDK adapter can reuse the same flattening logic.
+func EncodeSLO(obj *monitoringpb.ServiceLevelObjective) map[string]any {
+	return encodeSLO(obj)
 }
 
 func encodeSLO(obj *monitoringpb.ServiceLevelObjective) map[string]any {
@@ -372,6 +307,11 @@ func encodeSLO(obj *monitoringpb.ServiceLevelObjective) map[string]any {
 	return out
 }
 
+// ServiceIDFromName is exported so the SDK adapter can attach friendly IDs.
+func ServiceIDFromName(fullName string) string {
+	return serviceIDFromName(fullName)
+}
+
 func serviceIDFromName(fullName string) string {
 	idx := strings.LastIndex(fullName, "/services/")
 	if idx < 0 {
@@ -383,26 +323,31 @@ func serviceIDFromName(fullName string) string {
 func workloadCPUQuery(namespace, workload string, window time.Duration) string {
 	return fmt.Sprintf(
 		"fetch k8s_container | filter resource.namespace_name = '%s' && (resource.pod_name =~ '%s-.*') | metric 'kubernetes.io/container/cpu/core_usage_time' | rate(1m) | within %s",
-		escape(namespace), escape(workload), durationLiteral(window),
+		escape(namespace), escape(workload), DurationLiteral(window),
 	)
 }
 
 func workloadMemoryQuery(namespace, workload string, window time.Duration) string {
 	return fmt.Sprintf(
 		"fetch k8s_container | filter resource.namespace_name = '%s' && (resource.pod_name =~ '%s-.*') | metric 'kubernetes.io/container/memory/used_bytes' | within %s",
-		escape(namespace), escape(workload), durationLiteral(window),
+		escape(namespace), escape(workload), DurationLiteral(window),
 	)
 }
 
 func workloadRestartQuery(namespace, workload string, window time.Duration) string {
 	return fmt.Sprintf(
 		"fetch k8s_container | filter resource.namespace_name = '%s' && (resource.pod_name =~ '%s-.*') | metric 'kubernetes.io/container/restart_count' | within %s",
-		escape(namespace), escape(workload), durationLiteral(window),
+		escape(namespace), escape(workload), DurationLiteral(window),
 	)
 }
 
 func escape(s string) string {
 	return strings.ReplaceAll(s, "'", "\\'")
+}
+
+// DurationLiteral converts a Go duration into MQL window syntax (e.g. "30m", "1h").
+func DurationLiteral(d time.Duration) string {
+	return durationLiteral(d)
 }
 
 func durationLiteral(d time.Duration) string {
@@ -456,7 +401,7 @@ func schemaQuery() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"query":     map[string]any{"type": "string", "description": "Cloud Monitoring MQL query."},
 		},
 		"required":             []string{"query"},
@@ -468,7 +413,7 @@ func schemaWorkload() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace of the workload."},
 			"workload":  map[string]any{"type": "string", "description": "Workload name (Deployment / StatefulSet / DaemonSet name)."},
 			"duration":  map[string]any{"type": "string", "description": "Window duration (e.g. '15m', '1h'). Default 30m."},
@@ -482,7 +427,7 @@ func schemaListDescriptors() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"filter":    map[string]any{"type": "string", "description": "Optional Cloud Monitoring metric descriptor filter (e.g. metric.type=starts_with(\"kubernetes.io/\"))."},
 			"limit":     map[string]any{"type": "integer", "description": "Max descriptors to return (default 50, max 500)."},
 		},
@@ -490,11 +435,11 @@ func schemaListDescriptors() map[string]any {
 	}
 }
 
-func schemaSLOStatus() map[string]any {
+func schemaSLOList() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT env or current GKE kubeconfig context."},
+			"projectId": map[string]any{"type": "string", "description": "GCP project ID. Falls back to GOOGLE_CLOUD_PROJECT or GCP_PROJECT env. Observability project is independent of the cluster (EKS/AKS can also ship to GCP), so set it explicitly."},
 			"serviceId": map[string]any{"type": "string", "description": "Optional Service Monitoring service ID. When omitted, lists all services and their SLOs."},
 			"limit":     map[string]any{"type": "integer", "description": "Max services and SLOs per service to enumerate (default 50, max 200)."},
 		},

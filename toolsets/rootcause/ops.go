@@ -38,6 +38,9 @@ func (t *Toolset) handleCapabilities(ctx context.Context, req mcp.ToolRequest) (
 		for _, required := range dep.Requires {
 			edges = append(edges, map[string]any{"from": dep.Tool, "to": required, "source": "declared"})
 		}
+		for _, optional := range dep.Optional {
+			edges = append(edges, map[string]any{"from": dep.Tool, "to": optional, "source": "optional"})
+		}
 	}
 	observedEdges := t.ctx.CallGraph.Edges()
 	edges = append(edges, observedEdges...)
@@ -244,6 +247,9 @@ func (t *Toolset) handleRCAGenerate(ctx context.Context, req mcp.ToolRequest) (m
 		if keyword := toString(args["keyword"]); keyword != "" {
 			bundleArgs["keyword"] = keyword
 		}
+		if workload := toString(args["workload"]); workload != "" {
+			bundleArgs["workload"] = workload
+		}
 		bundleResult, err := t.call(ctx, req.User, "rootcause.incident_bundle", bundleArgs)
 		aggregated.Merge(bundleResult.Metadata)
 		if err != nil {
@@ -418,6 +424,9 @@ func (t *Toolset) resolveBundle(ctx context.Context, req mcp.ToolRequest, args m
 		}
 		if keyword := toString(args["keyword"]); keyword != "" {
 			bundleArgs["keyword"] = keyword
+		}
+		if workload := toString(args["workload"]); workload != "" {
+			bundleArgs["workload"] = workload
 		}
 		bundleResult, err := t.call(ctx, req.User, "rootcause.incident_bundle", bundleArgs)
 		meta.Merge(bundleResult.Metadata)

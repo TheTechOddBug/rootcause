@@ -9,14 +9,26 @@ import (
 type ToolDependency struct {
 	Tool     string
 	Requires []string
+	// Optional declares soft dependencies — tools that are invoked when present
+	// but skipped silently when absent. Shown in the capabilities graph as
+	// `source: "optional"` edges; never trigger validation errors.
+	Optional []string
 }
 
 func RequiredToolDependencies() []ToolDependency {
 	deps := []ToolDependency{
-		{Tool: "rootcause.incident_bundle", Requires: []string{"k8s.overview", "k8s.events_timeline", "k8s.diagnose"}},
+		{
+			Tool:     "rootcause.incident_bundle",
+			Requires: []string{"k8s.overview", "k8s.events_timeline", "k8s.diagnose"},
+			Optional: []string{"gcp.metrics.workload", "gcp.logs.workload"},
+		},
 		{Tool: "rootcause.change_timeline", Requires: []string{"k8s.events_timeline"}},
 		{Tool: "k8s.diagnose", Requires: []string{"k8s.debug_flow"}},
 		{Tool: "k8s.debug_flow", Requires: []string{"k8s.graph"}},
+		{
+			Tool:     "gcp.logs.correlated_with_bundle",
+			Optional: []string{"rootcause.incident_bundle"},
+		},
 	}
 	sort.Slice(deps, func(i, j int) bool { return deps[i].Tool < deps[j].Tool })
 	return deps

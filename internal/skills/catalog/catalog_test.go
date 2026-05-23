@@ -168,6 +168,29 @@ func TestLoadWithCustomIncludesConfiguredCustomSkills(t *testing.T) {
 	}
 }
 
+func TestEmbeddedManifestIncludesGCPSkill(t *testing.T) {
+	manifest, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	var found Skill
+	for _, s := range manifest.Skills {
+		if s.Name == "k8s-gcp" {
+			found = s
+			break
+		}
+	}
+	if found.Name == "" {
+		t.Fatalf("expected k8s-gcp skill in embedded manifest")
+	}
+	if found.Category != "Cloud Observability" {
+		t.Errorf("expected category 'Cloud Observability', got %q", found.Category)
+	}
+	if found.Path != "skills/claude/k8s-gcp/SKILL.md" {
+		t.Errorf("unexpected path: %s", found.Path)
+	}
+}
+
 func TestCatalogHelpersCoverCustomAndBuiltInSkills(t *testing.T) {
 	manifest := Manifest{Skills: []Skill{
 		{Name: "beta", Category: "Ops", Path: "skills/claude/beta/SKILL.md"},

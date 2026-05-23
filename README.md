@@ -210,9 +210,9 @@ Agent directory defaults used by `sync-skills`:
 | Sourcegraph Cody | `SKILL.md` | `.cody/skills/` |
 | Amazon Q | `SKILL.md` | `.amazonq/skills/` |
 
-### Available Skills (21)
+### Available Skills (22)
 
-20 skills are currently included.
+22 skills are currently included.
 
 | Category | Skills |
 |---|---|
@@ -226,6 +226,7 @@ Agent directory defaults used by `sync-skills`:
 | Cost and Scaling | `k8s-cost`, `k8s-autoscaling` |
 | Storage | `k8s-storage` |
 | Browser Automation | `k8s-browser` |
+| Cloud Observability | `k8s-gcp` |
 
 
 Supported agents include Claude, Cursor, Codex, Gemini CLI, GitHub Copilot, Goose, Windsurf, Roo, Amp, and more.
@@ -276,6 +277,7 @@ Pre-built workflow prompts for Kubernetes and platform operations:
 | `terraform_drift_triage` | Investigate Terraform drift and plan safety |
 | `aws_eks_operational_check` | EKS health, nodegroup, and IAM integration diagnostics |
 | `karpenter_capacity_debug` | Debug Karpenter provisioning and scheduling issues |
+| `gcp_workload_diagnose` | Triage a workload using GCP Cloud Monitoring + Cloud Logging (any cluster shipping to a GCP project) |
 
 Custom prompt overrides are also supported. Resolution order:
 1. `MCP_PROMPTS_FILE`
@@ -687,7 +689,7 @@ Enabled by default:
 | `istio` | Service mesh configuration and proxy diagnostics | Istio control plane |
 | `helm` | Chart registry/release workflows and diffing | Helm 3 and cluster access |
 | `aws` | EKS/EC2/VPC/IAM/ECR/KMS/STS diagnostics | AWS credentials |
-| `gcp` | Cloud Monitoring metrics + SLOs, Cloud Logging analysis for GKE workloads | GCP credentials (ADC or `GOOGLE_APPLICATION_CREDENTIALS`); project from `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or current GKE kubeconfig context |
+| `gcp` | Cloud Monitoring metrics + SLOs, Cloud Logging analysis for any workload shipping telemetry to GCP (GKE, EKS, AKS, or self-managed) | GCP credentials (ADC or `GOOGLE_APPLICATION_CREDENTIALS`); project from `GOOGLE_CLOUD_PROJECT` / `GCP_PROJECT` env, or explicit `projectId` arg |
 | `terraform` | Registry and plan impact analysis | Terraform workflows |
 | `rootcause` | Incident bundles, RCA, timeline, postmortem export | Kubernetes access |
 | `browser` (optional) | Browser automation via agent-browser | `MCP_BROWSER_ENABLED=true` + agent-browser install |
@@ -817,7 +819,7 @@ Prompt templates for common debugging flows are in `prompts/prompt.md`.
 - `gcp.metrics.query` — run a raw Cloud Monitoring MQL query and return time series.
 - `gcp.metrics.workload` — CPU, memory, and restart count metrics for a Kubernetes workload over a time window.
 - `gcp.metrics.list_descriptors` — list Cloud Monitoring metric descriptors for discoverability (accepts a Monitoring filter).
-- `gcp.metrics.slo_status` — enumerate Service Monitoring services and their SLOs (goal, period, indicator type).
+- `gcp.metrics.slo_list` — enumerate Service Monitoring services and their SLO configuration (goal, period, indicator type). Live burn-rate is out of scope; use `gcp.metrics.query` with MQL `select_slo_burn_rate(...)` when needed.
 
 ### GCP Logs (`gcp.logs.*`)
 
@@ -837,6 +839,8 @@ Prompt templates for common debugging flows are in `prompts/prompt.md`.
 ### RootCause (`rootcause.*`)
 
 - `rootcause.incident_bundle`, `rootcause.change_timeline`, `rootcause.rca_generate`, `rootcause.remediation_playbook`, `rootcause.postmortem_export`, `rootcause.capabilities`
+
+`rootcause.incident_bundle` accepts an optional `workload` argument. When provided alongside `namespace`, and the `gcp` toolset is enabled, the default chain automatically appends `gcp.metrics.workload` and `gcp.logs.workload` so the bundle includes GCP-side metrics and logs for that workload. `rca_generate`, `remediation_playbook`, and `postmortem_export` propagate `workload` through to the auto-built bundle as well.
 
 ### Browser (`browser_*`, optional)
 
@@ -917,7 +921,8 @@ Project ID resolution order:
 1. Explicit `projectId` argument on the tool call.
 2. `GOOGLE_CLOUD_PROJECT` env var.
 3. `GCP_PROJECT` env var.
-4. Auto-detect from the current kubeconfig context when it matches the GKE pattern `gke_PROJECT_REGION_CLUSTER` (created by `gcloud container clusters get-credentials`).
+
+The observability project is **not** auto-detected from the kubeconfig context — an EKS or AKS cluster can also ship logs and metrics to GCP, so the project must come from the user, not from the cluster's control-plane identity.
 
 When `gcp.metrics.workload` and `gcp.logs.workload` are enabled and `rootcause.incident_bundle` is called with both `namespace` and `workload`, the default bundle chain auto-includes GCP workload metrics and logs alongside the k8s evidence.
 

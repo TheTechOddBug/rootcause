@@ -26,3 +26,52 @@ func TestValidateToolDependenciesMissingRequired(t *testing.T) {
 		t.Fatalf("expected dependency validation error")
 	}
 }
+
+func TestValidateToolDependenciesIgnoresMissingOptional(t *testing.T) {
+	// All required deps for rootcause.incident_bundle present; gcp.* optional
+	// deps are absent. Validation must succeed.
+	reg := NewRegistry(nil)
+	for _, name := range []string{
+		"rootcause.incident_bundle",
+		"rootcause.change_timeline",
+		"k8s.overview",
+		"k8s.events_timeline",
+		"k8s.diagnose",
+		"k8s.debug_flow",
+		"k8s.graph",
+	} {
+		_ = reg.Add(ToolSpec{Name: name, Safety: SafetyReadOnly})
+	}
+	if err := ValidateToolDependencies(reg, RequiredToolDependencies()); err != nil {
+		t.Fatalf("expected no validation error when only optional deps are missing: %v", err)
+	}
+}
+
+func TestRequiredToolDependenciesDeclaresGCPOptional(t *testing.T) {
+	deps := RequiredToolDependencies()
+	var found ToolDependency
+	for _, d := range deps {
+		if d.Tool == "rootcause.incident_bundle" {
+			found = d
+			break
+		}
+	}
+	if found.Tool == "" {
+		t.Fatalf("expected rootcause.incident_bundle entry")
+	}
+	if !containsString(found.Optional, "gcp.metrics.workload") {
+		t.Errorf("expected gcp.metrics.workload as optional, got %v", found.Optional)
+	}
+	if !containsString(found.Optional, "gcp.logs.workload") {
+		t.Errorf("expected gcp.logs.workload as optional, got %v", found.Optional)
+	}
+}
+
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,6 +16,46 @@ func TestRenderPromptTemplate(t *testing.T) {
 	text := renderPromptTemplate("hello {{name}} in {{namespace|default}}", map[string]string{"name": "api"})
 	if text != "hello api in default" {
 		t.Fatalf("unexpected rendered prompt: %q", text)
+	}
+}
+
+func TestGCPWorkloadDiagnoseRendering(t *testing.T) {
+	var spec promptSpec
+	for _, p := range builtinPrompts {
+		if p.Name == "gcp_workload_diagnose" {
+			spec = p
+			break
+		}
+	}
+	if spec.Name == "" {
+		t.Fatalf("expected gcp_workload_diagnose to be defined")
+	}
+	if len(spec.Arguments) < 2 {
+		t.Fatalf("expected at least namespace + workload args")
+	}
+	h := buildPromptHandler(spec)
+	res, err := h(context.Background(), &sdkmcp.GetPromptRequest{Params: &sdkmcp.GetPromptParams{Arguments: map[string]string{
+		"namespace":  "payments",
+		"workload":   "checkout-api",
+		"project_id": "my-obs-proj",
+		"duration":   "1h",
+	}}})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	text := res.Messages[0].Content.(*sdkmcp.TextContent).Text
+	for _, must := range []string{
+		"payments/checkout-api",
+		"Project: my-obs-proj",
+		"Window: 1h",
+		"rootcause.incident_bundle",
+		"gcp.logs.error_timeline",
+		"gcp.logs.correlated_with_bundle",
+		"gcp.metrics.slo_list",
+	} {
+		if !strings.Contains(text, must) {
+			t.Errorf("rendered prompt missing %q\n--- rendered ---\n%s", must, text)
+		}
 	}
 }
 
@@ -55,6 +96,7 @@ func TestRegisterSDKPrompts(t *testing.T) {
 		"istio_mesh_diagnose":       false,
 		"terraform_drift_triage":    false,
 		"aws_eks_operational_check": false,
+		"gcp_workload_diagnose":     false,
 	}
 	for _, name := range names {
 		if _, ok := required[name]; ok {

@@ -455,6 +455,35 @@ Workload: {{workload|all pending workloads}}
 - Evidence (events/config constraints)
 - Fastest safe mitigation and long-term fix`,
 	},
+	{
+		Name:        "gcp_workload_diagnose",
+		Title:       "GCP Workload Diagnose",
+		Description: "Triage a Kubernetes workload using GCP Cloud Monitoring metrics and Cloud Logging signals. Works for any cluster (GKE, EKS, AKS) shipping telemetry to a GCP project.",
+		Arguments: []sdkmcp.PromptArgument{
+			{Name: "namespace", Description: "Workload namespace", Required: true},
+			{Name: "workload", Description: "Workload (Deployment / StatefulSet / DaemonSet) name", Required: true},
+			{Name: "project_id", Description: "GCP observability project ID (falls back to GOOGLE_CLOUD_PROJECT)", Required: false},
+			{Name: "duration", Description: "Lookback window (e.g. 30m, 1h)", Required: false},
+		},
+		Template: `# GCP Workload Diagnose: {{namespace}}/{{workload}}
+
+Project: {{project_id|GOOGLE_CLOUD_PROJECT env}}
+Window: {{duration|30m}}
+
+## Investigation Flow
+1. Build evidence with rootcause.incident_bundle (namespace, workload set so GCP steps trigger)
+2. Inspect gcp.metrics.workload for CPU/memory/restart anomalies in the window
+3. Run gcp.logs.error_timeline to find the inflection point (bucketSize 1m for tight windows)
+4. Pull correlated logs via gcp.logs.correlated_with_bundle using the bundle's time range
+5. Cross-reference k8s events and helm releases from the bundle for change correlation
+6. If SLOs exist, list them with gcp.metrics.slo_list and check current goals against observed metrics
+
+## Output Contract
+- Time-aligned summary (k8s events vs GCP error spike vs deploy/release)
+- Identified inflection point with bucket evidence
+- Root-cause hypothesis with metric + log evidence references
+- Remediation actions and validation checks`,
+	},
 }
 
 func RegisterSDKPrompts(server *sdkmcp.Server, ctx ToolContext) ([]string, error) {
