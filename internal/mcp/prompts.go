@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"sigs.k8s.io/yaml"
 )
 
 type promptSpec struct {
@@ -42,6 +44,16 @@ var defaultPromptConfigPaths = []string{
 	"~/.rootcause/prompts.toml",
 	"~/.config/rootcause/prompts.toml",
 	"./rootcause-prompts.toml",
+}
+
+// defaultPromptDirs are scanned (in order) when no explicit prompts directory is
+// configured. The first directory that exists is used. Per-file prompts (.md /
+// .toml) inside that directory are loaded as customs that override built-ins by
+// name.
+var defaultPromptDirs = []string{
+	"~/.rootcause/prompts",
+	"~/.config/rootcause/prompts",
+	"./rootcause-prompts.d",
 }
 
 var builtinPrompts = []promptSpec{
@@ -516,20 +528,36 @@ func loadPromptSpecs(ctx ToolContext) ([]promptSpec, error) {
 		merged[spec.Name] = spec
 	}
 
-	path := resolvePromptConfigPath(ctx)
-	if path == "" {
-		return promptSpecsInOrder(merged, order), nil
-	}
-	custom, err := loadPromptSpecsFromTOML(path)
-	if err != nil {
-		return nil, err
-	}
-	for _, spec := range custom {
-		if _, exists := merged[spec.Name]; !exists {
-			order = append(order, spec.Name)
+	// Directory scan first (recommended layout, one prompt per file).
+	dir := resolvePromptConfigDir(ctx)
+	if dir != "" {
+		dirSpecs, err := loadPromptSpecsFromDir(dir)
+		if err != nil {
+			return nil, err
 		}
-		merged[spec.Name] = spec
+		for _, spec := range dirSpecs {
+			if _, exists := merged[spec.Name]; !exists {
+				order = append(order, spec.Name)
+			}
+			merged[spec.Name] = spec
+		}
 	}
+
+	// Legacy single-file path (still supported; merges on top of dir results).
+	path := resolvePromptConfigPath(ctx)
+	if path != "" {
+		fileSpecs, err := loadPromptSpecsFromTOML(path)
+		if err != nil {
+			return nil, err
+		}
+		for _, spec := range fileSpecs {
+			if _, exists := merged[spec.Name]; !exists {
+				order = append(order, spec.Name)
+			}
+			merged[spec.Name] = spec
+		}
+	}
+
 	return promptSpecsInOrder(merged, order), nil
 }
 
@@ -542,6 +570,197 @@ func promptSpecsInOrder(specs map[string]promptSpec, order []string) []promptSpe
 		}
 	}
 	return out
+}
+
+// resolvePromptConfigDir returns the first existing prompts directory. Search
+// order: ROOTCAUSE_PROMPTS_DIR env var, [prompts].dir from config, then the
+// defaultPromptDirs list. Returns "" when none exists.
+func resolvePromptConfigDir(ctx ToolContext) string {
+	if env := strings.TrimSpace(os.Getenv("ROOTCAUSE_PROMPTS_DIR")); env != "" {
+		expanded := expandPromptPath(env)
+		if dirExists(expanded) {
+			return expanded
+		}
+	}
+	if ctx.Config != nil {
+		cfgDir := strings.TrimSpace(ctx.Config.Prompts.Dir)
+		if cfgDir != "" {
+			expanded := expandPromptPath(cfgDir)
+			if dirExists(expanded) {
+				return expanded
+			}
+		}
+	}
+	for _, p := range defaultPromptDirs {
+		expanded := expandPromptPath(p)
+		if dirExists(expanded) {
+			return expanded
+		}
+	}
+	return ""
+}
+
+// loadPromptSpecsFromDir scans dir for prompt files (alphabetical order for
+// determinism). *.md files are parsed as markdown with YAML front-matter (one
+// prompt per file). *.toml files are parsed via the legacy [[prompt]] format.
+// Other files are ignored. Hidden files (leading dot) are skipped.
+func loadPromptSpecsFromDir(dir string) ([]promptSpec, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read prompts dir %s: %w", dir, err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	merged := map[string]promptSpec{}
+	order := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		var specs []promptSpec
+		switch strings.ToLower(filepath.Ext(name)) {
+		case ".md":
+			spec, err := loadPromptSpecFromMarkdown(full)
+			if err != nil {
+				return nil, err
+			}
+			specs = []promptSpec{spec}
+		case ".toml":
+			loaded, err := loadPromptSpecsFromTOML(full)
+			if err != nil {
+				return nil, err
+			}
+			specs = loaded
+		default:
+			continue
+		}
+		for _, s := range specs {
+			if _, exists := merged[s.Name]; !exists {
+				order = append(order, s.Name)
+			}
+			merged[s.Name] = s
+		}
+	}
+	out := make([]promptSpec, 0, len(order))
+	for _, n := range order {
+		out = append(out, merged[n])
+	}
+	return out, nil
+}
+
+// promptMarkdownFront is the YAML front-matter schema for per-file prompts.
+type promptMarkdownFront struct {
+	Name        string                  `yaml:"name" json:"name"`
+	Title       string                  `yaml:"title" json:"title"`
+	Description string                  `yaml:"description" json:"description"`
+	Arguments   []promptMarkdownArgYAML `yaml:"arguments" json:"arguments"`
+}
+
+type promptMarkdownArgYAML struct {
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description" json:"description"`
+	Required    bool   `yaml:"required" json:"required"`
+}
+
+// loadPromptSpecFromMarkdown parses one .md file as `--- YAML front-matter ---`
+// followed by the template body. The body is used verbatim as the prompt's
+// template (after trimming surrounding whitespace).
+func loadPromptSpecFromMarkdown(path string) (promptSpec, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return promptSpec{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	front, body, err := splitFrontMatter(data)
+	if err != nil {
+		return promptSpec{}, fmt.Errorf("parse front-matter in %s: %w", path, err)
+	}
+	var meta promptMarkdownFront
+	if len(front) > 0 {
+		if err := yaml.Unmarshal(front, &meta); err != nil {
+			return promptSpec{}, fmt.Errorf("decode front-matter in %s: %w", path, err)
+		}
+	}
+	name := strings.TrimSpace(meta.Name)
+	if name == "" {
+		// Fallback to filename without extension, with dashes converted to underscores.
+		base := filepath.Base(path)
+		ext := filepath.Ext(base)
+		name = strings.ReplaceAll(strings.TrimSuffix(base, ext), "-", "_")
+	}
+	template := strings.TrimSpace(string(body))
+	if template == "" {
+		return promptSpec{}, fmt.Errorf("prompt %s in %s has empty body template", name, path)
+	}
+	args := make([]sdkmcp.PromptArgument, 0, len(meta.Arguments))
+	for _, a := range meta.Arguments {
+		argName := strings.TrimSpace(a.Name)
+		if argName == "" {
+			return promptSpec{}, fmt.Errorf("invalid argument in %s: name is required", path)
+		}
+		args = append(args, sdkmcp.PromptArgument{
+			Name:        argName,
+			Description: strings.TrimSpace(a.Description),
+			Required:    a.Required,
+		})
+	}
+	return promptSpec{
+		Name:        name,
+		Title:       strings.TrimSpace(meta.Title),
+		Description: strings.TrimSpace(meta.Description),
+		Arguments:   args,
+		Template:    template,
+	}, nil
+}
+
+// splitFrontMatter separates a leading `--- ... ---` YAML block from the body.
+// When no front-matter is present, returns (nil, raw, nil). The closing `---`
+// must appear on its own line.
+func splitFrontMatter(data []byte) (front, body []byte, err error) {
+	// Strip UTF-8 BOM if present.
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		data = data[3:]
+	}
+	s := string(data)
+	trimmed := strings.TrimLeft(s, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "---") {
+		return nil, data, nil
+	}
+	// Position right after the opening "---" line.
+	openLineEnd := strings.IndexByte(trimmed[3:], '\n')
+	if openLineEnd < 0 {
+		return nil, nil, fmt.Errorf("unterminated front-matter")
+	}
+	rest := trimmed[3+openLineEnd+1:]
+	closeIdx := strings.Index(rest, "\n---")
+	if closeIdx < 0 {
+		return nil, nil, fmt.Errorf("front-matter missing closing ---")
+	}
+	frontText := rest[:closeIdx]
+	after := rest[closeIdx+len("\n---"):]
+	if nl := strings.IndexByte(after, '\n'); nl >= 0 {
+		after = after[nl+1:]
+	} else {
+		after = ""
+	}
+	// Strip leading blank lines so callers see the body content directly.
+	after = strings.TrimLeft(after, "\n\r")
+	return []byte(frontText), []byte(after), nil
+}
+
+func dirExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }
 
 func resolvePromptConfigPath(ctx ToolContext) string {
@@ -656,6 +875,64 @@ func buildPromptHandler(spec promptSpec) sdkmcp.PromptHandler {
 				Content: &sdkmcp.TextContent{Text: text},
 			}},
 		}, nil
+	}
+}
+
+// PromptSpec is the exported view of a registered prompt used by external
+// consumers (e.g. the sync-commands CLI). The struct mirrors the internal
+// promptSpec but uses primitive types to avoid leaking the MCP SDK type.
+type PromptSpec struct {
+	Name        string
+	Title       string
+	Description string
+	Arguments   []PromptArgument
+	Template    string
+}
+
+// PromptArgument is the exported argument metadata for a PromptSpec.
+type PromptArgument struct {
+	Name        string
+	Description string
+	Required    bool
+}
+
+// BuiltinPromptSpecs returns a deep copy of the server's built-in prompt
+// catalog. Callers can read but not mutate the live list.
+func BuiltinPromptSpecs() []PromptSpec {
+	out := make([]PromptSpec, 0, len(builtinPrompts))
+	for _, p := range builtinPrompts {
+		out = append(out, toExportedPromptSpec(p))
+	}
+	return out
+}
+
+// LoadPromptSpecsForCLI returns built-in plus any prompts discovered via the
+// usual config path resolution (MCP_PROMPTS_FILE env, [prompts].file, the
+// default search paths). Used by sync-commands so custom prompts also generate
+// slash-command files.
+func LoadPromptSpecsForCLI(ctx ToolContext) ([]PromptSpec, error) {
+	specs, err := loadPromptSpecs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PromptSpec, 0, len(specs))
+	for _, p := range specs {
+		out = append(out, toExportedPromptSpec(p))
+	}
+	return out, nil
+}
+
+func toExportedPromptSpec(p promptSpec) PromptSpec {
+	args := make([]PromptArgument, 0, len(p.Arguments))
+	for _, a := range p.Arguments {
+		args = append(args, PromptArgument{Name: a.Name, Description: a.Description, Required: a.Required})
+	}
+	return PromptSpec{
+		Name:        p.Name,
+		Title:       p.Title,
+		Description: p.Description,
+		Arguments:   args,
+		Template:    p.Template,
 	}
 }
 

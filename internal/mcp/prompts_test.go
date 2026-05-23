@@ -142,6 +142,223 @@ template = "Investigate {{service|payments}}"
 	}
 }
 
+func TestSplitFrontMatter(t *testing.T) {
+	body := []byte("---\nname: hello\ndescription: world\n---\n\nThe body\nover two lines\n")
+	front, rest, err := splitFrontMatter(body)
+	if err != nil {
+		t.Fatalf("splitFrontMatter: %v", err)
+	}
+	if !strings.Contains(string(front), "name: hello") {
+		t.Errorf("front-matter not extracted: %q", front)
+	}
+	if !strings.HasPrefix(string(rest), "The body") {
+		t.Errorf("body not extracted: %q", rest)
+	}
+
+	// File with no front-matter returns body unchanged.
+	plain := []byte("just a body, no front-matter\n")
+	front, rest, err = splitFrontMatter(plain)
+	if err != nil {
+		t.Fatalf("splitFrontMatter plain: %v", err)
+	}
+	if front != nil {
+		t.Errorf("expected nil front-matter on plain body, got %q", front)
+	}
+	if string(rest) != string(plain) {
+		t.Errorf("plain body should pass through, got %q", rest)
+	}
+
+	// Unclosed front-matter is an error.
+	if _, _, err := splitFrontMatter([]byte("---\nname: oops\n")); err == nil {
+		t.Errorf("expected error for unclosed front-matter")
+	}
+
+	// BOM at start is tolerated.
+	withBOM := append([]byte{0xEF, 0xBB, 0xBF}, body...)
+	front, _, err = splitFrontMatter(withBOM)
+	if err != nil {
+		t.Fatalf("BOM should be stripped, got error: %v", err)
+	}
+	if !strings.Contains(string(front), "name: hello") {
+		t.Errorf("BOM stripped but front-matter missing: %q", front)
+	}
+}
+
+func TestLoadPromptSpecFromMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "team-status.md")
+	content := `---
+name: team_status
+description: Daily status check
+arguments:
+  - name: workload
+    description: Deployment name
+    required: true
+  - name: namespace
+    description: Namespace
+    required: false
+---
+
+Show me {{workload}} in {{namespace|default}}.
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	spec, err := loadPromptSpecFromMarkdown(path)
+	if err != nil {
+		t.Fatalf("loadPromptSpecFromMarkdown: %v", err)
+	}
+	if spec.Name != "team_status" {
+		t.Errorf("expected name team_status, got %q", spec.Name)
+	}
+	if spec.Description != "Daily status check" {
+		t.Errorf("unexpected description: %q", spec.Description)
+	}
+	if len(spec.Arguments) != 2 {
+		t.Fatalf("expected 2 arguments, got %d", len(spec.Arguments))
+	}
+	if spec.Arguments[0].Name != "workload" || !spec.Arguments[0].Required {
+		t.Errorf("workload arg malformed: %#v", spec.Arguments[0])
+	}
+	if spec.Arguments[1].Required {
+		t.Errorf("namespace arg should be optional")
+	}
+	if !strings.HasPrefix(spec.Template, "Show me {{workload}}") {
+		t.Errorf("template not preserved: %q", spec.Template)
+	}
+}
+
+func TestLoadPromptSpecFromMarkdownFallsBackToFilename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "my-special-prompt.md")
+	// No `name` in front-matter; loader should derive from file name.
+	content := `---
+description: No explicit name
+---
+
+Hello {{x}}.
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	spec, err := loadPromptSpecFromMarkdown(path)
+	if err != nil {
+		t.Fatalf("loadPromptSpecFromMarkdown: %v", err)
+	}
+	if spec.Name != "my_special_prompt" {
+		t.Errorf("expected derived name 'my_special_prompt', got %q", spec.Name)
+	}
+}
+
+func TestLoadPromptSpecFromMarkdownEmptyBodyErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.md")
+	content := `---
+name: empty
+description: Nothing here
+---
+
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := loadPromptSpecFromMarkdown(path); err == nil {
+		t.Errorf("expected error for empty body")
+	}
+}
+
+func TestLoadPromptSpecsFromDirMixesMDAndTOML(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte(`---
+name: a_prompt
+description: alpha
+arguments: []
+---
+
+Body of a.
+`), 0o600); err != nil {
+		t.Fatalf("write a.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.toml"), []byte(`
+[[prompt]]
+name = "b_prompt"
+description = "beta"
+template = "Body of b."
+`), 0o600); err != nil {
+		t.Fatalf("write b.toml: %v", err)
+	}
+	// Files starting with dot are skipped.
+	_ = os.WriteFile(filepath.Join(dir, ".hidden.md"), []byte(`---
+name: should_not_load
+description: hidden
+---
+hidden body`), 0o600)
+	// Unknown extensions are skipped.
+	_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored"), 0o600)
+
+	specs, err := loadPromptSpecsFromDir(dir)
+	if err != nil {
+		t.Fatalf("loadPromptSpecsFromDir: %v", err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("expected 2 prompts (a + b), got %d (%+v)", len(specs), specs)
+	}
+	names := []string{specs[0].Name, specs[1].Name}
+	if names[0] != "a_prompt" || names[1] != "b_prompt" {
+		t.Errorf("unexpected alphabetical ordering: %v", names)
+	}
+}
+
+func TestLoadPromptSpecsHonorsDirThenLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptsDir, "from-dir.md"), []byte(`---
+name: from_dir
+description: loaded from dir
+---
+
+Body.
+`), 0o600); err != nil {
+		t.Fatalf("write dir prompt: %v", err)
+	}
+	legacy := filepath.Join(dir, "legacy.toml")
+	if err := os.WriteFile(legacy, []byte(`
+[[prompt]]
+name = "from_legacy"
+description = "loaded from legacy file"
+template = "Hello"
+`), 0o600); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+
+	t.Setenv("ROOTCAUSE_PROMPTS_DIR", promptsDir)
+	t.Setenv("ROOTCAUSE_PROMPTS_FILE", legacy)
+
+	specs, err := loadPromptSpecs(ToolContext{})
+	if err != nil {
+		t.Fatalf("loadPromptSpecs: %v", err)
+	}
+	gotDir := false
+	gotLegacy := false
+	for _, s := range specs {
+		if s.Name == "from_dir" {
+			gotDir = true
+		}
+		if s.Name == "from_legacy" {
+			gotLegacy = true
+		}
+	}
+	if !gotDir {
+		t.Errorf("expected dir prompt to be loaded")
+	}
+	if !gotLegacy {
+		t.Errorf("expected legacy file prompt to be loaded alongside dir")
+	}
+}
+
 func TestLoadPromptSpecsFromTOMLLegacyArgumentKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "prompts.toml")
 	content := `

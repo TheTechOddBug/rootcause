@@ -129,6 +129,58 @@ rootcause sync-skills --agent claude --skill k8s-incident --skill rootcause-rca
 rootcause sync-skills --list-skills
 ```
 
+### Sync Prompts as Native Slash Commands
+
+By default, MCP prompts appear in clients under namespaced forms like
+`/mcp__rootcause__gcp_workload_diagnose`. Use `sync-commands` to expose them as
+bare `/<prompt-name>` slash commands instead — same UX as your skills sync.
+
+```bash
+# List supported agents and per-agent target directories
+rootcause sync-commands --list-agents
+
+# Sync all built-in prompts as native slash commands for Claude Code
+# Writes ./.claude/commands/<prompt-name>.md per prompt.
+rootcause sync-commands --agent claude --project-dir .
+
+# Install user-globally (~/.claude/commands/)
+rootcause sync-commands --agent claude --project-dir ~
+
+# Generate for all supported agents
+rootcause sync-commands --all-agents
+
+# Include custom prompts from [prompts].file or ~/.rootcause/prompts.toml
+rootcause sync-commands --agent claude --include-custom
+
+# Subset by name
+rootcause sync-commands --agent claude --prompt gcp_workload_diagnose
+
+# Inspect what would be generated without writing
+rootcause sync-commands --agent claude --dry-run
+```
+
+Per-agent target directories:
+
+| Agent | Project-local | File extension |
+|---|---|---|
+| `claude` | `.claude/commands/` | `.md` |
+| `cursor` | `.cursor/commands/` | `.md` |
+| `codex`  | `.codex/commands/`  | `.md` |
+| `copilot`| `.github/prompts/`  | `.prompt.md` |
+| `gemini` | `.gemini/commands/` | `.md` |
+| `opencode`| `.opencode/commands/` | `.md` |
+| `windsurf`| `.windsurf/commands/` | `.md` |
+| `aider`  | `.aider/commands/`  | `.md` |
+
+After syncing, prompts that took `{{namespace}}` `{{workload}}` arguments become
+positional `$1` `$2` in the client. Optional `{{name|default}}` tokens land as
+`$N` and a "Defaults" preamble lists fallback values so the agent applies them
+when an argument is omitted.
+
+Skills and commands sync are complementary: skills give the agent always-on
+guidance attached to tool calls; commands give the *human* a clean
+`/<name>` shortcut. The MCP `prompts/list` endpoint stays available either way.
+
 ### User Custom Skills
 
 Users can add team or personal skills in a folder containing one subdirectory per skill:
@@ -279,28 +331,82 @@ Pre-built workflow prompts for Kubernetes and platform operations:
 | `karpenter_capacity_debug` | Debug Karpenter provisioning and scheduling issues |
 | `gcp_workload_diagnose` | Triage a workload using GCP Cloud Monitoring + Cloud Logging (any cluster shipping to a GCP project) |
 
-Custom prompt overrides are also supported. Resolution order:
-1. `MCP_PROMPTS_FILE`
-2. `ROOTCAUSE_PROMPTS_FILE`
-3. `[prompts].file` in `config.toml`
-4. Default files: `~/.rootcause/prompts.toml`, `~/.config/rootcause/prompts.toml`, `./rootcause-prompts.toml`
+### Authoring custom prompts and skills
 
-Example custom prompt file:
+For a full walkthrough with a realistic example (AWS PrivateLink debugging),
+see [`docs/AUTHORING.md`](docs/AUTHORING.md). It covers writing a prompt,
+writing a complementary skill, syncing both into your client, and what happens
+when the AI runs the resulting workflow end-to-end.
+
+Quick reference below.
+
+#### Adding Custom Prompts (recommended: one file per prompt)
+
+Drop one markdown file per prompt into `~/.rootcause/prompts/`. Each file declares the prompt's metadata in YAML front-matter and the rendered text below.
+
+```
+~/.rootcause/prompts/
+  team-status.md
+  payments-p1-drill.md
+  verify-deploy.md
+```
+
+Example — `~/.rootcause/prompts/team-status.md`:
+
+```markdown
+---
+name: team_status
+description: Daily status check for a workload
+arguments:
+  - name: workload
+    description: Deployment name
+    required: true
+  - name: namespace
+    description: Namespace (defaults to payments)
+    required: false
+---
+
+Give me the current health of workload {{workload}} in namespace {{namespace|payments}}.
+
+Check:
+- Pod status (running / restarting / pending)
+- Recent errors in logs (last 30 minutes)
+- Any k8s events that look unusual
+
+Keep it to 5 bullet points.
+```
+
+After saving, expose it as a bare `/<name>` slash command:
+
+```bash
+rootcause sync-commands --agent claude --include-custom
+```
+
+Resolution order (first match wins for the directory; the legacy single-file path is also loaded and merged on top):
+
+| Priority | Directory (recommended) | Single file (legacy) |
+|---|---|---|
+| 1 | `ROOTCAUSE_PROMPTS_DIR` env | `MCP_PROMPTS_FILE` env |
+| 2 | `[prompts].dir` in `config.toml` | `ROOTCAUSE_PROMPTS_FILE` env |
+| 3 | `~/.rootcause/prompts/` | `[prompts].file` in `config.toml` |
+| 4 | `~/.config/rootcause/prompts/` | `~/.rootcause/prompts.toml` |
+| 5 | `./rootcause-prompts.d/` | `~/.config/rootcause/prompts.toml`, `./rootcause-prompts.toml` |
+
+A custom prompt whose `name:` matches a built-in **replaces** it — useful for org-specific overrides of `troubleshoot_workload` etc.
+
+Legacy multi-prompt TOML files are still supported. Place a `*.toml` file inside the prompts directory and it will be parsed in the `[[prompt]]` format:
 
 ```toml
+# ~/.rootcause/prompts/security.toml
 [[prompt]]
 name = "security_audit"
-title = "Custom Security Audit"
 description = "Org-specific security policy checks"
-template = "Run custom security audit for {{namespace|all namespaces}} with CIS and policy controls"
+template = "Run security audit for {{namespace|all namespaces}} with CIS and policy controls."
 
   [[prompt.arguments]]
   name = "namespace"
-  description = "Target namespace"
   required = false
 ```
-
-Custom prompts override built-ins with the same `name`.
 
 ### Key Capabilities
 

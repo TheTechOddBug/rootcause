@@ -64,7 +64,14 @@ type TransportConfig struct {
 }
 
 type PromptsConfig struct {
+	// File points at a single TOML file containing one or more [[prompt]]
+	// entries. Legacy format; still supported for backward compatibility.
 	File string `toml:"file"`
+	// Dir points at a directory containing one prompt per file. Files ending
+	// in .md are parsed as YAML front-matter + body template (recommended).
+	// Files ending in .toml are parsed in the legacy [[prompt]] format and
+	// may contain multiple prompts per file.
+	Dir string `toml:"dir"`
 }
 
 type SkillsConfig struct {
