@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
-
 	"rootcause/internal/skills/catalog"
 )
 
@@ -60,101 +58,6 @@ var canonicalAgentKeys = []string{
 }
 
 var defaultCustomSkillDirs = []string{"~/.rootcause/skills"}
-
-func newSyncSkillsCmd(stderr io.Writer) *cobra.Command {
-	var agent string
-	var projectDir string
-	var sourceDir string
-	var overwrite bool
-	var listOnly bool
-	var listSkills bool
-	var allAgents bool
-	var dryRun bool
-	var skillFilters []string
-	var includeCustom bool
-	var customDirs []string
-	var allowCustomOverrides bool
-
-	cmd := &cobra.Command{
-		Use:   "sync-skills",
-		Short: "Sync skills into agent-specific project directories",
-		PreRunE: func(_ *cobra.Command, _ []string) error {
-			if listOnly || listSkills {
-				return nil
-			}
-			if !allAgents && strings.TrimSpace(agent) == "" {
-				return fmt.Errorf("--agent is required unless --all-agents, --list-agents, or --list-skills is set")
-			}
-			return nil
-		},
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if listOnly {
-				return listAgentTargets(stderr)
-			}
-			manifest, err := loadSkillManifest(includeCustom || len(customDirs) > 0, customDirs, allowCustomOverrides)
-			if err != nil {
-				return err
-			}
-			if listSkills {
-				return listSkillsCatalog(stderr, manifest)
-			}
-			skills, err := selectedSkills(manifest, skillFilters)
-			if err != nil {
-				return err
-			}
-			source := sourceDir
-			if !filepath.IsAbs(source) {
-				source = filepath.Join(projectDir, source)
-			}
-			targetKeys := []string{strings.ToLower(strings.TrimSpace(agent))}
-			if allAgents {
-				targetKeys = append([]string{}, canonicalAgentKeys...)
-			}
-			total := 0
-			for _, key := range targetKeys {
-				target, ok := agentTargets[key]
-				if !ok {
-					return fmt.Errorf("unsupported agent %q; use --list-agents to view supported values", key)
-				}
-				count, dest, err := syncSkillsForTarget(source, projectDir, target, skills, overwrite, dryRun)
-				if err != nil {
-					return err
-				}
-				total += count
-				if stderr == nil {
-					stderr = os.Stdout
-				}
-				action := "Synced"
-				if dryRun {
-					action = "Would sync"
-				}
-				_, _ = fmt.Fprintf(stderr, "%s %d skill(s) for %s into %s\n", action, count, target.Agent, dest)
-			}
-			if stderr == nil {
-				stderr = os.Stdout
-			}
-			if !dryRun {
-				_, _ = fmt.Fprintf(stderr, "Total synced skill copies: %d\n", total)
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&agent, "agent", "", "target agent: claude|cursor|codex|gemini|opencode|copilot|windsurf|devin|aider|cody|amazonq")
-	cmd.Flags().StringVar(&projectDir, "project-dir", ".", "project directory root")
-	cmd.Flags().StringVar(&sourceDir, "source", "skills/claude", "source skills directory")
-	cmd.Flags().BoolVar(&overwrite, "overwrite", true, "overwrite existing files")
-	cmd.Flags().BoolVar(&listOnly, "list-agents", false, "list supported agent targets and exit")
-	cmd.Flags().BoolVar(&listSkills, "list-skills", false, "list embedded skills catalog and exit")
-	cmd.Flags().BoolVar(&allAgents, "all-agents", false, "sync skills to all supported agents")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned copies without writing files")
-	cmd.Flags().StringSliceVar(&skillFilters, "skill", nil, "sync only selected skill name(s); can be repeated")
-	cmd.Flags().BoolVar(&includeCustom, "include-custom", false, "include custom skills from --custom-dir or ~/.rootcause/skills")
-	cmd.Flags().StringSliceVar(&customDirs, "custom-dir", nil, "custom skills directory containing <skill-name>/SKILL.md; can be repeated")
-	cmd.Flags().BoolVar(&allowCustomOverrides, "custom-overrides", false, "allow custom skills to override built-in skill names")
-
-	return cmd
-}
 
 func loadSkillManifest(includeCustom bool, customDirs []string, allowCustomOverrides bool) (catalog.Manifest, error) {
 	if !includeCustom {

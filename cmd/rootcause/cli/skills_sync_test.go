@@ -179,12 +179,12 @@ func TestExecuteListAgentsWithoutRunServer(t *testing.T) {
 		return nil
 	}
 	var out bytes.Buffer
-	err := Execute(context.Background(), []string{"sync-skills", "--list-agents"}, run, "test", &out)
+	err := Execute(context.Background(), []string{"sync", "--list-agents"}, run, "test", &out)
 	if err != nil {
 		t.Fatalf("execute list-agents: %v", err)
 	}
 	if called {
-		t.Fatalf("expected runServer not to be called for sync-skills")
+		t.Fatalf("expected runServer not to be called for sync")
 	}
 	if out.Len() == 0 {
 		t.Fatalf("expected list output")

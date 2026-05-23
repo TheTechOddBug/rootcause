@@ -108,7 +108,7 @@ attaches to. Each tag matches:
 Verify the skill loads:
 
 ```bash
-rootcause sync-skills --include-custom --list-skills | grep privatelink
+rootcause sync --list-skills | grep privatelink
 ```
 
 You should see `privatelink-rules` in the output.
@@ -212,16 +212,18 @@ The prompt is server-side via MCP, but for clean `/privatelink-debug` slash
 command UX, generate the client-native file:
 
 ```bash
-rootcause sync-commands --agent claude --include-custom
-rootcause sync-skills   --agent claude --include-custom
+rootcause sync --agent claude
 ```
 
-What this writes (default targets):
+One command writes both surfaces. Default targets:
 
 ```
-~/.claude/commands/privatelink-debug.md      # the slash command
-~/.claude/skills/privatelink-rules/SKILL.md  # the skill (also surfaced via MCP)
+~/.claude/commands/privatelink-debug.md      # the slash command (your prompt)
+~/.claude/skills/privatelink-rules/SKILL.md  # the skill (also attached via MCP)
 ```
+
+Use `--prompts-only` or `--skills-only` if you want to update just one
+surface. Existing files are NOT overwritten unless you pass `--overwrite`.
 
 Restart Claude Code (or start a fresh chat).
 
@@ -320,13 +322,12 @@ $EDITOR ~/.rootcause/prompts/privatelink-debug.md
 $EDITOR ~/.rootcause/skills/privatelink-rules/SKILL.md
 
 # 2. Re-sync
-rootcause sync-commands --agent claude --include-custom
-rootcause sync-skills   --agent claude --include-custom
+rootcause sync --agent claude
 
 # 3. New chat in Claude Code (or restart)
 ```
 
-Three commands. Same loop for every change.
+Two commands. Same loop for every change.
 
 **Tip:** keep both files in a git repo (e.g. `team-runbooks/`) and symlink into
 `~/.rootcause/`:
@@ -391,28 +392,34 @@ need a new tool.
 ## CLI cheatsheet
 
 ```bash
-# List everything available
-rootcause sync-commands --list-prompts --include-custom
-rootcause sync-skills   --list-skills   --include-custom
+# List everything available (prompts + skills, built-in + custom)
+rootcause sync --list
 
-# Sync to one client
-rootcause sync-commands --agent claude --include-custom
-rootcause sync-skills   --agent claude --include-custom
+# Sync everything to one client (project-local)
+rootcause sync --agent claude --project-dir .
 
-# Sync to all supported clients
-rootcause sync-commands --all-agents --include-custom
-rootcause sync-skills   --all-agents --include-custom
+# Sync user-globally (writes ~/.claude/... instead of ./.claude/...)
+rootcause sync --agent claude --user
 
-# Subset by name
-rootcause sync-commands --agent claude --prompt privatelink_debug --include-custom
-rootcause sync-skills   --agent claude --skill privatelink-rules --include-custom
+# Sync to every supported client
+rootcause sync --all-agents
 
-# Dry-run to see what would be written
-rootcause sync-commands --agent claude --include-custom --dry-run
+# Subset
+rootcause sync --agent claude --prompt privatelink_debug
+rootcause sync --agent claude --skill  privatelink-rules
 
-# Project-local install (writes ./.claude/... instead of ~/.claude/...)
-rootcause sync-commands --agent claude --include-custom --project-dir .
-rootcause sync-skills   --agent claude --include-custom --project-dir .
+# Only one surface
+rootcause sync --agent claude --prompts-only
+rootcause sync --agent claude --skills-only
+
+# Existing files are never clobbered unless you say so
+rootcause sync --agent claude --overwrite
+
+# Inspect without writing
+rootcause sync --agent claude --dry-run
+
+# Use a specific config file (loads [prompts].dir / [skills].custom_dirs)
+rootcause sync --agent claude --config /etc/rootcause/config.toml
 ```
 
 ---
@@ -465,8 +472,8 @@ for team-scoped guidance that shouldn't bleed into other teams' investigations.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Prompt doesn't appear in `--list-prompts` | File has a TOML/YAML syntax error or wrong directory | Check `~/.rootcause/prompts/` path; run `rootcause sync-commands --include-custom --list-prompts` |
-| `/<name>` not in Claude Code's slash menu | Forgot to run `sync-commands` or didn't restart the client | Re-sync; new chat session |
+| Prompt doesn't appear in `--list-prompts` | File has a TOML/YAML syntax error or wrong directory | Check `~/.rootcause/prompts/` path; run `rootcause sync --list-prompts` |
+| `/<name>` not in Claude Code's slash menu | Forgot to run `sync` or didn't restart the client | Re-sync; new chat session |
 | Slash command exists but AI doesn't follow the workflow | Template body doesn't actually instruct the AI clearly | Make the steps imperative ("Call X with Y"), not narrative |
 | Skill never attaches to tool calls | `tags:` line missing, or tags don't match what the AI calls | Add a broader tag (the toolset name) or instruct the prompt to pass `skillTags` |
 | Skill attaches but AI ignores the rules | Rules are too long or buried | Lead with `Always:` / `Never:` bullet lists; keep the file under ~50 lines |

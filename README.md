@@ -111,75 +111,64 @@ cp -r skills/claude/* ~/.claude/skills/
 cp -r skills/claude/k8s-helm ~/.claude/skills/
 ```
 
-### Sync Skills into Project Agent Directories
+### Sync prompts and skills into your agent
+
+One command syncs both prompts (as slash commands) and skills (as agent-side
+guidance) into your AI client's native directories. By default everything is
+synced; use `--prompts-only` or `--skills-only` for granular control. Custom
+prompts under `~/.rootcause/prompts/` and custom skills under
+`~/.rootcause/skills/` are picked up automatically.
 
 ```bash
-# List supported agent targets
-rootcause sync-skills --list-agents
+# List supported agents (shows both commands + skills directories)
+rootcause sync --list-agents
 
-# Sync skills for one agent into project-local defaults
-rootcause sync-skills --agent claude --project-dir .
+# List everything available (built-in + custom prompts and skills)
+rootcause sync --list
 
-# Example: GitHub Copilot project files
-rootcause sync-skills --agent copilot --project-dir .
+# Default: sync both prompts and skills for one agent (project-local)
+rootcause sync --agent claude --project-dir .
 
-# UX helpers
-rootcause sync-skills --all-agents --dry-run
-rootcause sync-skills --agent claude --skill k8s-incident --skill rootcause-rca
-rootcause sync-skills --list-skills
+# User-globally — writes ~/.claude/commands/ and ~/.claude/skills/
+rootcause sync --agent claude --user
+
+# All supported agents
+rootcause sync --all-agents
+
+# Granular control
+rootcause sync --agent claude --prompts-only
+rootcause sync --agent claude --skills-only
+rootcause sync --agent claude --prompt gcp_workload_diagnose
+rootcause sync --agent claude --skill k8s-incident
+
+# Existing files are NOT overwritten by default. Opt in:
+rootcause sync --agent claude --overwrite
+
+# Dry-run to see what would be written
+rootcause sync --agent claude --dry-run
+
+# Ignore custom directories and sync only built-ins
+rootcause sync --agent claude --builtin-only
 ```
 
-### Sync Prompts as Native Slash Commands
-
-By default, MCP prompts appear in clients under namespaced forms like
-`/mcp__rootcause__gcp_workload_diagnose`. Use `sync-commands` to expose them as
-bare `/<prompt-name>` slash commands instead — same UX as your skills sync.
-
-```bash
-# List supported agents and per-agent target directories
-rootcause sync-commands --list-agents
-
-# Sync all built-in prompts as native slash commands for Claude Code
-# Writes ./.claude/commands/<prompt-name>.md per prompt.
-rootcause sync-commands --agent claude --project-dir .
-
-# Install user-globally (~/.claude/commands/)
-rootcause sync-commands --agent claude --project-dir ~
-
-# Generate for all supported agents
-rootcause sync-commands --all-agents
-
-# Include custom prompts from [prompts].file or ~/.rootcause/prompts.toml
-rootcause sync-commands --agent claude --include-custom
-
-# Subset by name
-rootcause sync-commands --agent claude --prompt gcp_workload_diagnose
-
-# Inspect what would be generated without writing
-rootcause sync-commands --agent claude --dry-run
-```
+Prompts that took `{{namespace}}` / `{{workload}}` tokens become positional
+`$1` / `$2` in the generated slash command. Optional `{{name|default}}` tokens
+render with a "Defaults" preamble so the agent applies fallbacks when an
+argument is omitted.
 
 Per-agent target directories:
 
-| Agent | Project-local | File extension |
+| Agent | Slash commands | Skills |
 |---|---|---|
-| `claude` | `.claude/commands/` | `.md` |
-| `cursor` | `.cursor/commands/` | `.md` |
-| `codex`  | `.codex/commands/`  | `.md` |
-| `copilot`| `.github/prompts/`  | `.prompt.md` |
-| `gemini` | `.gemini/commands/` | `.md` |
-| `opencode`| `.opencode/commands/` | `.md` |
-| `windsurf`| `.windsurf/commands/` | `.md` |
-| `aider`  | `.aider/commands/`  | `.md` |
-
-After syncing, prompts that took `{{namespace}}` `{{workload}}` arguments become
-positional `$1` `$2` in the client. Optional `{{name|default}}` tokens land as
-`$N` and a "Defaults" preamble lists fallback values so the agent applies them
-when an argument is omitted.
-
-Skills and commands sync are complementary: skills give the agent always-on
-guidance attached to tool calls; commands give the *human* a clean
-`/<name>` shortcut. The MCP `prompts/list` endpoint stays available either way.
+| `claude` | `.claude/commands/` | `.claude/skills/` |
+| `cursor` | `.cursor/commands/` | `.cursor/skills/` |
+| `codex`  | `.codex/commands/`  | `.codex/skills/` |
+| `copilot`| `.github/prompts/`  | `.github/skills/` |
+| `gemini` | `.gemini/commands/` | `.gemini/skills/` |
+| `opencode`| `.opencode/commands/` | `.opencode/skills/` |
+| `windsurf`| `.windsurf/commands/` | `.windsurf/skills/` |
+| `aider`  | `.aider/commands/`  | `.aider/skills/` |
+| `devin`, `cody`, `amazonq` | (no slash-command directory yet) | `.devin/skills/` etc. |
 
 ### User Custom Skills
 
@@ -220,8 +209,8 @@ Use narrower tags when the guidance should only apply to part of the flow:
 Sync custom skills into supported agent directories:
 
 ```bash
-rootcause sync-skills --agent opencode --include-custom
-rootcause sync-skills --agent claude --custom-dir ~/.rootcause/skills --skill team-runbook
+rootcause sync --agent opencode --skills-only
+rootcause sync --agent claude --custom-skill-dir ~/.rootcause/skills --skill team-runbook
 ```
 
 Expose custom skills through MCP resources by initializing the home config:
@@ -246,21 +235,15 @@ Syncing skills into `.claude/`, `.codex/`, `.opencode/`, or other agent-specific
 
 Do not put secrets, credentials, kubeconfigs, tokens, or private incident data in custom `SKILL.md` files. Matching skills can be returned in MCP tool responses for the connected client to read.
 
-Agent directory defaults used by `sync-skills`:
+Skill file formats per agent:
 
-| Agent | Format | Project Directory |
-|---|---|---|
-| Claude Code | `SKILL.md` | `.claude/skills/` |
-| Cursor | `.mdc` | `.cursor/skills/` |
-| Codex | `SKILL.md` | `.codex/skills/` |
-| Gemini CLI | `SKILL.md` | `.gemini/skills/` |
-| OpenCode | `SKILL.md` | `.opencode/skills/` |
-| GitHub Copilot | `Markdown` | `.github/skills/` |
-| Windsurf | `Markdown` | `.windsurf/skills/` |
-| Devin | `Markdown` | `.devin/skills/` |
-| Aider | `SKILL.md` | `.aider/skills/` |
-| Sourcegraph Cody | `SKILL.md` | `.cody/skills/` |
-| Amazon Q | `SKILL.md` | `.amazonq/skills/` |
+| Agent | Format |
+|---|---|
+| Claude Code, Codex, Gemini CLI, OpenCode, Aider, Sourcegraph Cody, Amazon Q | `SKILL.md` |
+| Cursor | `.mdc` |
+| GitHub Copilot, Windsurf, Devin | plain `.md` |
+
+For the matching slash-command directories per agent, see the unified table earlier in this section.
 
 ### Available Skills (22)
 
@@ -379,7 +362,7 @@ Keep it to 5 bullet points.
 After saving, expose it as a bare `/<name>` slash command:
 
 ```bash
-rootcause sync-commands --agent claude --include-custom
+rootcause sync --agent claude
 ```
 
 Resolution order (first match wins for the directory; the legacy single-file path is also loaded and merged on top):
@@ -536,11 +519,13 @@ Enable read-only mode:
 rootcause --read-only
 ```
 
-Sync skills into agent-specific project directories:
+Sync prompts (as slash commands) and skills into agent-specific project directories:
 
 ```bash
-rootcause sync-skills --agent claude --project-dir .
+rootcause sync --agent claude --project-dir .
 ```
+
+See [`docs/AUTHORING.md`](docs/AUTHORING.md) for an end-to-end walkthrough that writes a custom prompt + skill for an AWS PrivateLink debug runbook.
 
 ---
 
@@ -992,7 +977,7 @@ Create a cross-platform home config first if you do not already have one:
 rootcause init-config
 ```
 
-The generated config enables `k8s`, `linkerd`, `karpenter`, `istio`, `helm`, `aws`, `terraform`, and `rootcause`, sets stdio transport defaults, and configures `~/.rootcause/skills` as the custom skill folder.
+The generated config enables `k8s`, `linkerd`, `karpenter`, `istio`, `helm`, `aws`, `gcp`, `terraform`, and `rootcause`, sets stdio transport defaults, and configures `~/.rootcause/skills` (skills) and `~/.rootcause/prompts/` (custom prompts) as the user-authored content directories.
 
 ### Flags
 

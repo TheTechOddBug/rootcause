@@ -2,13 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/spf13/cobra"
 
 	rcmcp "rootcause/internal/mcp"
 )
@@ -54,139 +51,6 @@ var canonicalCommandAgentKeys = []string{
 	"aider",
 }
 
-func newSyncCommandsCmd(stderr io.Writer) *cobra.Command {
-	var agent string
-	var projectDir string
-	var overwrite bool
-	var listAgents bool
-	var listPrompts bool
-	var allAgents bool
-	var dryRun bool
-	var promptFilters []string
-	var includeCustom bool
-	var promptsFile string
-
-	cmd := &cobra.Command{
-		Use:   "sync-commands",
-		Short: "Sync MCP prompts as agent-native slash commands (e.g. /<prompt-name> in Claude Code)",
-		Long: `Generate native slash-command files for each MCP prompt registered by RootCause.
-
-Without sync, prompts only appear in clients under namespaced forms like
-'/mcp__rootcause__<prompt>'. After sync, each prompt is reachable as a bare
-'/<prompt>' command in the supported agent.
-
-Per-agent target directories:
-  claude  -> .claude/commands/
-  cursor  -> .cursor/commands/
-  codex   -> .codex/commands/
-  copilot -> .github/prompts/
-  others  -> .<agent>/commands/`,
-		PreRunE: func(_ *cobra.Command, _ []string) error {
-			if listAgents || listPrompts {
-				return nil
-			}
-			if !allAgents && strings.TrimSpace(agent) == "" {
-				return fmt.Errorf("--agent is required unless --all-agents, --list-agents, or --list-prompts is set")
-			}
-			return nil
-		},
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if listAgents {
-				return listCommandTargets(stderr)
-			}
-			specs, err := loadPromptSpecsForSync(includeCustom, promptsFile)
-			if err != nil {
-				return err
-			}
-			if listPrompts {
-				return listPromptsCatalog(stderr, specs)
-			}
-			specs, err = selectedPrompts(specs, promptFilters)
-			if err != nil {
-				return err
-			}
-			targetKeys := []string{strings.ToLower(strings.TrimSpace(agent))}
-			if allAgents {
-				targetKeys = append([]string{}, canonicalCommandAgentKeys...)
-			}
-			total := 0
-			for _, key := range targetKeys {
-				target, ok := commandTargets[key]
-				if !ok {
-					return fmt.Errorf("unsupported agent %q; use --list-agents to view supported values", key)
-				}
-				count, dest, err := syncCommandsForTarget(projectDir, target, specs, overwrite, dryRun)
-				if err != nil {
-					return err
-				}
-				total += count
-				if stderr == nil {
-					stderr = os.Stdout
-				}
-				action := "Synced"
-				if dryRun {
-					action = "Would sync"
-				}
-				_, _ = fmt.Fprintf(stderr, "%s %d command(s) for %s into %s\n", action, count, target.Agent, dest)
-			}
-			if stderr == nil {
-				stderr = os.Stdout
-			}
-			if !dryRun {
-				_, _ = fmt.Fprintf(stderr, "Total synced command files: %d\n", total)
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&agent, "agent", "", "target agent: claude|cursor|codex|copilot|gemini|opencode|windsurf|aider")
-	cmd.Flags().StringVar(&projectDir, "project-dir", ".", "project directory root (use '~' for user-global config)")
-	cmd.Flags().BoolVar(&overwrite, "overwrite", true, "overwrite existing files")
-	cmd.Flags().BoolVar(&listAgents, "list-agents", false, "list supported agent targets and exit")
-	cmd.Flags().BoolVar(&listPrompts, "list-prompts", false, "list available prompts and exit")
-	cmd.Flags().BoolVar(&allAgents, "all-agents", false, "sync to all supported agents")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned writes without touching disk")
-	cmd.Flags().StringSliceVar(&promptFilters, "prompt", nil, "sync only selected prompt name(s); can be repeated")
-	cmd.Flags().BoolVar(&includeCustom, "include-custom", false, "also discover prompts via the standard config paths (~/.rootcause/prompts.toml etc.)")
-	cmd.Flags().StringVar(&promptsFile, "prompts-file", "", "explicit path to a custom prompts TOML file (implies --include-custom)")
-
-	return cmd
-}
-
-func loadPromptSpecsForSync(includeCustom bool, promptsFile string) ([]rcmcp.PromptSpec, error) {
-	if !includeCustom && strings.TrimSpace(promptsFile) == "" {
-		return rcmcp.BuiltinPromptSpecs(), nil
-	}
-	if strings.TrimSpace(promptsFile) != "" {
-		// Use the resolver chain by setting the env var temporarily.
-		prev := os.Getenv("ROOTCAUSE_PROMPTS_FILE")
-		_ = os.Setenv("ROOTCAUSE_PROMPTS_FILE", promptsFile)
-		defer func() { _ = os.Setenv("ROOTCAUSE_PROMPTS_FILE", prev) }()
-	}
-	return rcmcp.LoadPromptSpecsForCLI(rcmcp.ToolContext{})
-}
-
-func listCommandTargets(w io.Writer) error {
-	if w == nil {
-		w = os.Stdout
-	}
-	for _, key := range canonicalCommandAgentKeys {
-		t := commandTargets[key]
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", key, t.Agent, t.Dir)
-	}
-	return nil
-}
-
-func listPromptsCatalog(w io.Writer, specs []rcmcp.PromptSpec) error {
-	if w == nil {
-		w = os.Stdout
-	}
-	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
-	for _, p := range specs {
-		_, _ = fmt.Fprintf(w, "  - %s\t%s\n", p.Name, p.Description)
-	}
-	return nil
-}
 
 func selectedPrompts(specs []rcmcp.PromptSpec, filters []string) ([]rcmcp.PromptSpec, error) {
 	if len(filters) == 0 {
